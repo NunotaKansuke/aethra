@@ -22,6 +22,7 @@ __all__ = [
     "smooth_multiscale",
     "coherent_excursions",
     "coherent_peak_scan",
+    "coherent_value_scan",
 ]
 
 DEFAULT_HALF_WIDTHS = (2.0, 4.0, 7.0, 14.0, 30.0)
@@ -266,11 +267,39 @@ def coherent_peak_scan(time, mag, mag_err=None, bin_days=1.0,
     if len(time) < min_nights:
         return _empty_scan()
 
-    order = np.argsort(time, kind="stable")
-    time, mag = time[order], mag[order]
-    flux = 10 ** (-0.4 * mag)
+    return coherent_value_scan(
+        time, 10 ** (-0.4 * mag), bin_days=bin_days, half_widths=half_widths,
+        min_nights=min_nights, sigma=sigma, max_join_days=max_join_days,
+        n_refine=n_refine,
+    )
 
-    binned_time, binned_flux, _ = daily_median_bins(time, flux, bin_days=bin_days)
+
+def coherent_value_scan(time, values, bin_days=1.0,
+                        half_widths=DEFAULT_HALF_WIDTHS, min_nights=3,
+                        sigma=3.0, max_join_days=20.0, n_refine=0):
+    """``coherent_peak_scan`` on an already-linear signal.
+
+    Separate from the magnitude entry point because PSPL residuals are the
+    other thing worth scanning and they go negative, so they cannot be routed
+    through a flux conversion. Everything downstream — binning, the robust
+    baseline, the multi-scale smoothing — only ever assumes the input is
+    linear, so the two share one implementation.
+
+    Parameters and returns are those of :func:`coherent_peak_scan`, with
+    ``values`` in place of ``mag``.
+    """
+    time = np.asarray(time, dtype=float)
+    values = np.asarray(values, dtype=float)
+
+    valid = np.isfinite(time) & np.isfinite(values)
+    time, values = time[valid], values[valid]
+    if len(time) < min_nights:
+        return _empty_scan()
+
+    order = np.argsort(time, kind="stable")
+    time, values = time[order], values[order]
+
+    binned_time, binned_flux, _ = daily_median_bins(time, values, bin_days=bin_days)
     if len(binned_time) < min_nights:
         return _empty_scan()
 

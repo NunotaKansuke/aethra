@@ -27,6 +27,7 @@ from .achromatic import achromatic_test_from_event
 from .coherence import (
     coherent_excursions,
     coherent_peak_scan,
+    coherent_value_scan,
     daily_median_bins,
     smooth_multiscale,
 )
@@ -43,9 +44,13 @@ from .plotting import plot_pspl_fit
 from .pspl import (
     fit_pspl,
     fit_pspl_candidate,
+    fit_pspl_full,
     pspl_magnification,
+    renormalize_errors,
+    residual_structure,
     solve_fs_fb,
 )
+from .pspl_seed import pspl_excess_magnification, pspl_fft_seed
 from .roman_variable import load_roman_variable
 from .schema import OUTPUT_COLUMNS
 from .seasons import analyze_season_scan, split_into_seasons
@@ -79,6 +84,7 @@ __all__ = [
     "smooth_multiscale",
     "coherent_excursions",
     "coherent_peak_scan",
+    "coherent_value_scan",
     # variability / periodicity
     "is_non_flat_lightcurve",
     "lomb_scargle_test",
@@ -93,6 +99,12 @@ __all__ = [
     "solve_fs_fb",
     "fit_pspl",
     "fit_pspl_candidate",
+    # PSPL as a classification axis (Stages 1, 3, 4)
+    "renormalize_errors",
+    "fit_pspl_full",
+    "residual_structure",
+    "pspl_fft_seed",
+    "pspl_excess_magnification",
     # seasons
     "split_into_seasons",
     "analyze_season_scan",
