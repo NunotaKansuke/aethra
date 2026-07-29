@@ -46,6 +46,7 @@ def _empty_result(obj_name):
         "veto_periodic": False, "veto_recurrent": False, "veto_chromatic": False,
         "veto_baseline_variable": False,
         "residual_significant": False, "residual_localized": False,
+        "fit_degenerate": False,
         "bump_flag": False, "is_flat": True, "n_up": 0, "n_nights": 0,
     })
     return row
@@ -106,9 +107,11 @@ def run_pipeline_from_dataframe(df, config, debug=False):
     config : dict
         See example_run.ipynb (Configuration cell) for all keys. Beyond the
         input-column names the ones that change what gets found are
-        ``min_peak_score`` (detection threshold, default 40) and
+        ``min_peak_score`` (detection threshold, default 40),
         ``residual_min_peak_score`` / ``residual_localization_tE`` (what counts
-        as anomalous residual structure).
+        as anomalous residual structure), ``max_error_renorm`` (above which the
+        baseline is not a baseline), and ``max_tE_over_duration`` (above which
+        the fitted timescale is flagged degenerate).
     debug : bool
         If True, print a per-object breakdown of each stage's verdict.
 
@@ -133,6 +136,7 @@ def run_pipeline_from_dataframe(df, config, debug=False):
     max_error_renorm  = config.get("max_error_renorm",   1000.0)
     residual_min_peak = config.get("residual_min_peak_score", 40.0)
     localization_tE   = config.get("residual_localization_tE", 2.0)
+    max_tE_over_dur   = config.get("max_tE_over_duration",    3.0)
 
     for col in [time_col, mag_col, err_col]:
         if col not in df.columns:
@@ -232,6 +236,24 @@ def run_pipeline_from_dataframe(df, config, debug=False):
                     min_peak_score=residual_min_peak,
                 )
 
+        # tE and u0 trade off along a nearly constant teff = u0 * tE, and the
+        # low-u0 branch of that valley can win on chi2 while describing the
+        # curve no better: the worst case measured put tE_fit = 3425 d on a
+        # 64.8 d event at u0_fit = 1e-4, the fit's own lower bound, with a
+        # perfectly ordinary chi2_red of 1.05. Stage 2 already measured how wide
+        # the excursion is without any model, and a PSPL bump is never narrower
+        # than its own tE, so a fit claiming tE longer than the excursion it is
+        # supposed to describe is self-inconsistent. Over 2215 fitted events
+        # this flagged 49 (2.2%); every one of the 15 fits wrong by more than
+        # 10x is inside that set, and no fit outside it was wrong by more than
+        # 3x in more than 0.3% of cases. It is reported, not vetoed: the event
+        # is real and detected, it is the timescale the data do not pin down.
+        fit_degenerate = bool(
+            fit is not None and np.isfinite(fit["tE_fit"])
+            and np.isfinite(scan["main_duration_days"]) and scan["main_duration_days"] > 0
+            and fit["tE_fit"] > max_tE_over_dur * scan["main_duration_days"]
+        )
+
         # Periodicity comes after the fit because the mask needs the event's
         # real extent, and the excursion width underestimates it badly for long
         # events: the robust baseline is measured from the event's own wings, so
@@ -312,6 +334,7 @@ def run_pipeline_from_dataframe(df, config, debug=False):
             "veto_recurrent": veto_recurrent,
             "veto_chromatic": veto_chromatic,
             "veto_baseline_variable": veto_baseline_variable,
+            "fit_degenerate": fit_degenerate,
             "is_achromatic": is_achromatic,
             "error_renorm": renorm["error_renorm"],
             "baseline_chi2_red": renorm["baseline_chi2_red"],

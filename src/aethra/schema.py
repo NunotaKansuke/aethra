@@ -65,6 +65,7 @@ OUTPUT_COLUMNS = [
     "chi2_red_pspl",
     "chi2_red_pspl_renorm",
     "frac_explained",
+    "fit_degenerate",
     # --- Stage 4: residual structure ---
     "residual_peak_score",
     "residual_offset_tE",

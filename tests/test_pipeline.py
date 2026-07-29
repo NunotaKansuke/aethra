@@ -415,3 +415,25 @@ def test_the_baseline_criterion_is_configurable():
 
     assert bool(strict["veto_baseline_variable"]) is True
     assert strict["label"] == "variable_star"
+
+
+def test_a_well_measured_event_is_not_flagged_degenerate():
+    """tE and u0 trade off along a nearly constant u0 * tE, and the low-u0 arm
+    of that valley can win on chi2 while describing the curve no better. The
+    check is against Stage 2, which measured how wide the excursion is with no
+    model at all: a PSPL bump is never narrower than its own tE."""
+    row = run_pipeline_from_dataframe(make_lightcurve(with_event=True), CONFIG).iloc[0]
+
+    assert bool(row["fit_degenerate"]) is False
+    assert row["tE_fit"] < 3.0 * row["main_duration_days"]
+
+
+def test_the_degeneracy_criterion_is_configurable_and_does_not_veto():
+    lc = make_lightcurve(with_event=True)
+    strict = run_pipeline_from_dataframe(
+        lc, {**CONFIG, "max_tE_over_duration": 1e-6}).iloc[0]
+
+    assert bool(strict["fit_degenerate"]) is True
+    # It is a caveat on the timescale, not a verdict on the event.
+    assert strict["label"] == "pspl_like"
+    assert bool(strict["is_candidate"]) is True

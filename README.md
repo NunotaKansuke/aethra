@@ -31,6 +31,23 @@ For each object the pipeline:
    identified by confident periodicity or by a chromatic brightening; a bad
    PSPL fit routes an object to `non_pspl_*`, it never discards it.
 
+### Measured
+
+On 2371 simulated Roman events, 11376 `roman_variable` light curves, and 2369
+real Roman light curves with the event seasons removed — the same objects
+through both pipelines, F146 only:
+
+| | recall (events) | false positives (variables) | false positives (quiet stars) |
+|---|---|---|---|
+| season-scoped χ² gate | 0.822 | 0.0768 (874/11376) | — |
+| this pipeline | 0.934 | 0.0003 (3/11376) | 0.0000 (0/2369) |
+
+The gate found 152 events this pipeline misses, at a median true peak
+amplitude of 0.09 mag; this pipeline finds 418 the gate missed, at a median of
+2.45 mag. Recall holds above 0.98 while the event occupies less than a tenth
+of the observed baseline and falls off past a fifth of it — a timescale long
+enough to leave no baseline to measure against is the honest limit of a
+model-free detector. Details and the reproduction scripts are in `.note/`.
 
 ## Installation
 for the most updated version:
@@ -214,6 +231,7 @@ Passed as the `config` dict (or the matching CLI flag).
 | `max_error_renorm`       | `1000.0` | Above this the baseline is not a baseline and the object is a variable star. |
 | `residual_min_peak_score`| `40.0` | How strong residual structure must be to count as real. |
 | `residual_localization_tE`| `2.0` | Residual structure within this many tE of t0 counts as localized. |
+| `max_tE_over_duration`   | `3.0` | A fitted tE this many times the model-free excursion width is flagged degenerate. |
 | `ffp_tE_max`             | `2.0`  | Max tE (days) to flag a free-floating-planet candidate. |
 | `chromatic_min_points`   | `5`    | Min points per band for the achromatic test. |
 
@@ -267,6 +285,7 @@ schema — but note it no longer means "PSPL fit well".
 | `chi2_red_pspl` | float | Reduced χ² of the PSPL fit |
 | `chi2_red_pspl_renorm` | float | The same divided by `error_renorm`. **Not a filter** — on a variable star the "baseline" is not baseline and this reaches values that pass any threshold |
 | `frac_explained` | float | `1 − χ²_pspl/χ²_flat` |
+| `fit_degenerate` | bool | `tE_fit > max_tE_over_duration × main_duration_days` — the fit slid down the tE↔u0 valley and the timescale is not determined by the data. **Reported only**, the event is still an event |
 | `residual_peak_score` | float | Coherence score of the fit residuals |
 | `residual_offset_tE` | float | Distance from t0 to the residual peak, in tE |
 | `residual_significant` | bool | The residual structure is real |
