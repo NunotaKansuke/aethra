@@ -207,9 +207,18 @@ The 3 remaining false positives are all shifted LPVs, with `peak_score` just abo
 
 ![Detection rate against amplitude, and candidate-list composition](figures/03-the-trade-and-list-purity.png)
 
-On single-lens (PSPL) events the detection rate goes down: 0.950 → 0.886.
+On single-lens (PSPL) events the detection rate goes down: 0.9496 → 0.8863. This is a subset of the 2371 events, not the whole sample, so it coexists with the overall gain:
 
-Panel (a) shows where that comes from. On `main` the detection rate falls monotonically with the true peak amplitude, from 1.00 below 0.02 mag to 0.79 above 1 mag. Each amplitude bin is the same set of events for both pipelines, so within a bin the two curves share a denominator; the bins themselves are very uneven (5, 77, 76, 196, 473, 1544 events, summing to 2371), which is why the leftmost point carries an error bar half the height of the panel.
+| true lens type | n | main | this branch | change |
+|---|---:|---:|---:|---:|
+| planetary lens | 1401 | 1071 (0.7645) | 1366 (0.9750) | **+295** |
+| binary lens / source | 196 | 143 (0.7296) | 163 (0.8316) | **+20** |
+| single lens (PSPL) | 774 | 735 (0.9496) | 686 (0.8863) | **−49** |
+| **all events** | **2371** | **1949 (0.8220)** | **2215 (0.9342)** | **+266** |
+
+The 49 lost on single-lens events are outweighed by the 295 gained on planetary ones, which is the larger group.
+
+Panel (a) shows where the 49 come from. On `main` the detection rate falls monotonically with the true peak amplitude, from 1.00 below 0.02 mag to 0.79 above 1 mag. Each amplitude bin is the same set of events for both pipelines, so within a bin the two curves share a denominator; the bins themselves are very uneven (5, 77, 76, 196, 473, 1544 events, summing to 2371), which is why the leftmost point carries an error bar half the height of the panel.
 
 That ordering follows from selecting on fit quality rather than on significance:
 
