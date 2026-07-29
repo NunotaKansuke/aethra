@@ -228,10 +228,20 @@ The 418 events gained have a median true amplitude of 2.454 mag; the 152 lost ha
 
 The same table for the 11376 variable stars: `main` raises 874 false positives and this branch raises 3, with no overlap — the 3 are not a subset of the 874.
 
-Panel (b) is the operational consequence, i.e. what a person inspecting the candidate list would see. Here the denominators genuinely differ, because the candidate list is an output rather than a fixed sample: `main` produces 2823 entries and this branch 2218, and the quantity being compared is the composition of each list.
+Panel (b) is the operational consequence, i.e. what a person inspecting the candidate list would see. Both pipelines screened the same 13747 objects, but the candidate list is an output, not a fixed sample, so the two bars are different heights: `main` emits 2823 candidates and this branch 2218. Each bar is split by what the objects turned out to be.
 
-- `main`: 874 of 2823 entries are variable stars (1 in 3)
-- this branch: 3 of 2218 (1 in 739)
+- `main`: 1949 real events + 874 variable stars = 2823, purity 0.690 (1 in 3 is a variable)
+- this branch: 2215 real events + 3 variable stars = 2218, purity 0.9986 (1 in 739)
+
+The shorter list is shorter only because of the red part. The two contributions move in opposite directions:
+
+| | main | this branch | change |
+|---|---:|---:|---:|
+| real events in the list | 1949 | 2215 | **+266** |
+| variable stars in the list | 874 | 3 | **−871** |
+| list length | 2823 | 2218 | −605 |
+
+So this branch hands back 605 fewer objects to inspect while containing 266 more real events than `main` did.
 
 ### 5.3 Negative set — real photometry with no event
 
