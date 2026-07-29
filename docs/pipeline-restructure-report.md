@@ -209,14 +209,26 @@ The 3 remaining false positives are all shifted LPVs, with `peak_score` just abo
 
 On single-lens (PSPL) events the detection rate goes down: 0.950 → 0.886.
 
-Panel (a) shows where that comes from. On `main` the detection rate falls monotonically with the true peak amplitude, from 1.00 below 0.02 mag to 0.79 above 1 mag. That ordering follows from selecting on fit quality rather than on significance:
+Panel (a) shows where that comes from. On `main` the detection rate falls monotonically with the true peak amplitude, from 1.00 below 0.02 mag to 0.79 above 1 mag. Each amplitude bin is the same set of events for both pipelines, so within a bin the two curves share a denominator; the bins themselves are very uneven (5, 77, 76, 196, 473, 1544 events, summing to 2371), which is why the leftmost point carries an error bar half the height of the panel.
+
+That ordering follows from selecting on fit quality rather than on significance:
 
 - a quiet light curve admits a flat PSPL at low chi2, so low-amplitude objects pass — which is also why 874 variables pass
 - a strong event carries larger anomalies, which raise chi2 — so strong events are rejected
 
-The 152 events this branch misses have a median true amplitude of 0.087 mag; the 418 it gains have a median of 2.454 mag.
+Object by object over the 2371 events:
 
-Panel (b) is the operational consequence, i.e. what a person inspecting the candidate list would see:
+| | this branch: missed | this branch: detected | total |
+|---|---:|---:|---:|
+| **main: missed** | 4 | 418 | 422 |
+| **main: detected** | 152 | 1797 | 1949 |
+| **total** | 156 | 2215 | 2371 |
+
+The 418 events gained have a median true amplitude of 2.454 mag; the 152 lost have a median of 0.087 mag. Note that 152 is the number lost *relative to main*, not the total miss count: this branch misses 156 events, 4 of which `main` also misses.
+
+The same table for the 11376 variable stars: `main` raises 874 false positives and this branch raises 3, with no overlap — the 3 are not a subset of the 874.
+
+Panel (b) is the operational consequence, i.e. what a person inspecting the candidate list would see. Here the denominators genuinely differ, because the candidate list is an output rather than a fixed sample: `main` produces 2823 entries and this branch 2218, and the quantity being compared is the composition of each list.
 
 - `main`: 874 of 2823 entries are variable stars (1 in 3)
 - this branch: 3 of 2218 (1 in 739)
