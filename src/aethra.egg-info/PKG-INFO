@@ -25,9 +25,9 @@ License: MIT License
         OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
         SOFTWARE.
         
-Project-URL: Homepage, https://github.com/rges-pit/aethra
-Project-URL: Repository, https://github.com/rges-pit/aethra
-Project-URL: Issues, https://github.com/rges-pit/aethra/issues
+Project-URL: Homepage, https://github.com/YOUR_USERNAME/aethra
+Project-URL: Repository, https://github.com/YOUR_USERNAME/aethra
+Project-URL: Issues, https://github.com/YOUR_USERNAME/aethra/issues
 Keywords: astronomy,microlensing,photometry,light-curves,time-series,exoplanets
 Classifier: Development Status :: 3 - Alpha
 Classifier: Intended Audience :: Science/Research
@@ -55,8 +55,6 @@ Dynamic: license-file
 
 # aethra
 
-**a**utomated **e**vent **t**racker and **c**haracterizer for **r**oman **a**lerts
-
 A configurable pipeline for detecting **microlensing events** in photometric
 light curves. It works with any dataset that has time, magnitude, and
 magnitude-error columns (column names are configurable), automatically handling
@@ -77,22 +75,17 @@ For each object the pipeline:
 4. Fits a **point-source point-lens (PSPL)** model to surviving candidates and
    flags short-timescale **free-floating-planet (FFP)** candidates.
 
+The result is a tidy `pandas.DataFrame`, one row per object, with the columns
+listed in [`OUTPUT_COLUMNS`](src/aethra/schema.py).
 
 ## Installation
-for the most updated version:
 
 ```bash
-git clone https://github.com/rges-pit/aethra.git
+git clone https://github.com/YOUR_USERNAME/aethra.git
 cd aethra
 pip install -e .
 ```
 (Note: don't forget the . after the -e)
-
-or stable version (note: this is not working yet): 
-
-```
-pip install aethra
-```
 Reading Parquet input needs the optional extra:
 
 ```bash
@@ -156,6 +149,22 @@ results = load_and_run("data.parquet", config)
 Keys you omit fall back to the built-in defaults; YAML `null` maps to Python
 `None` (e.g. `group_col: null` means one object per file).
 
+## Command line
+
+The package installs an `aethra` console script:
+
+```bash
+# Drive the whole run from a YAML config file
+aethra data.parquet --config config.yaml -o results.csv
+
+# Or pass options as flags (flags override anything also set in --config)
+aethra "lc/*.txt" --columns bjd mag mag_err -o results.csv
+
+# A multi-object CSV with a header row
+aethra data.csv --sep "," --header 0 --group-col name -o results.csv
+```
+
+Run `aethra --help` for the full option list.
 
 ## Configuration reference
 
@@ -200,29 +209,13 @@ Passed as the `config` dict (or the matching CLI flag).
 
 ## Output columns
 
-| Column | Type | Description |
-|---|---|---|
-| `name` | str | Object identifier |
-| `is_candidate` | bool | Passed bump test and all three vetoes |
-| `is_ffp_candidate` | bool | Candidate with tE < `ffp_tE_max` days |
-| `is_variable_star` | bool | Passed bump test but rejected by at least one veto |
-| `veto_periodic` | bool | Rejected by periodicity veto |
-| `veto_recurrent` | bool | Rejected by recurrent bump veto |
-| `veto_chromatic` | bool | Rejected by chromatic veto |
-| `is_achromatic` | bool/nan | Result of achromatic test (`nan` = inconclusive) |
-| `best_season` | int | Season ID with the highest bump SNR |
-| `is_flat` | bool | Lightcurve is consistent with a flat baseline |
-| `chi2_flat` | float | χ² of flat model fit |
-| `dof_flat` | int | Degrees of freedom |
-| `chi2_red_flat` | float | Reduced χ² of flat model |
-| `bump_flag` | bool | Rolling-SNR bump detected |
-| `bump_snr` | float | Peak bump SNR |
-| `t0_fit` | float | PSPL best-fit peak time (HJD − 2450000) |
-| `u0_fit` | float | PSPL best-fit impact parameter |
-| `tE_fit` | float | PSPL best-fit Einstein crossing time (days) |
-| `chi2_red_pspl` | float | Reduced χ² of PSPL fit |
-| `baseline_mag` | float | Median baseline magnitude |
-| `peak_mag` | float | Peak (brightest) magnitude |
+`name`, `is_candidate`, `is_ffp_candidate`, `is_variable_star`,
+`veto_periodic`, `veto_recurrent`, `veto_chromatic`, `is_achromatic`,
+`best_season`, `is_flat`, `chi2_flat`, `dof_flat`, `chi2_red_flat`,
+`bump_flag`, `bump_snr`, `t0_fit`, `u0_fit`, `tE_fit`, `chi2_red_pspl`,
+`baseline_mag`, `peak_mag`.
+
+`t0_fit` is reported with `2450000` subtracted.
 
 ## Package layout
 
@@ -241,6 +234,28 @@ src/aethra/
 └── cli.py           # `aethra` console script
 ```
 
+## Known quirks
+
+These reflect the behavior of the original code and are **preserved as-is**;
+they are documented here so you can decide whether to change them:
+
+- **`config["fap_threshold"]` is not currently wired into the periodic veto.**
+  `run_pipeline_from_dataframe` calls the off-season periodicity check with a
+  hardcoded `fap_threshold=1e-6`. The config key only affects the standalone
+  `is_periodic` / `lomb_scargle_test` helpers. To honor the config value in the
+  pipeline, pass `fap_threshold=...` into `periodic_veto_from_other_seasons`.
+- **`split_into_seasons` labels the very first data point separately.** The
+  first point of a light curve keeps label `0` while the rest of season one is
+  labeled `1`. In practice that single-point "season 0" is dropped by the
+  `min_points` filter, but it does mean the first epoch is excluded from the
+  season scan.
+
+## Testing
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
 
 ## License
 

@@ -1,91 +1,86 @@
-# 検出と分類を分離するパイプライン再構成 — 測定レポート
+# Separating detection from classification — measurement report
 
-対象ブランチ: `agent/season-free-coherence-detection`
-比較対象: `main` (`9c2bbd6`)
-評価データ: `sample_rtmodel_v2.4` の 2371 イベント + `roman_variable` カタログの 11376 変光星 + 実測光から作った 2369 負例
-すべて Roman W146 単バンド、同一の測光データ、同一のオブジェクト集合での直接比較。
+Branch: `agent/season-free-coherence-detection`
+Compared against: `main` (`9c2bbd6`)
+Evaluation data: 2371 events from `sample_rtmodel_v2.4`, 11376 variable stars from the `roman_variable` catalogue, and 2369 negative light curves built from the same photometry.
+
+Both pipelines were run on the same objects, the same photometry, and the same single band (Roman W146).
 
 ---
 
-## 0. 要約
+## 0. Summary
 
-| 指標 | main | 本ブランチ |
+| Metric | main | this branch |
 |---|---|---|
-| **FNR** (2371 イベント) | 0.1780 | **0.0658** |
-| **FPR** (11376 変光星) | 0.0768 | **0.00026** |
-| **FPR** (2369 負例) | — | **0.00000** |
-| 候補リストの純度 | 0.690 | **0.9986** |
-| **惑星レンズ 1401 件の検出率** | 0.7645 | **0.9750** |
+| FNR (2371 events) | 0.1780 | **0.0658** |
+| FPR (11376 variable stars) | 0.0768 | **0.00026** |
+| FPR (2369 negatives) | — | **0.00000** |
+| Candidate-list purity | 0.690 | **0.9986** |
+| Detection rate, 1401 planetary lenses | 0.7645 | **0.9750** |
 
-FNR と FPR を**同時に**下げている。トレードオフではない。
+FNR and FPR move down together; this is not a threshold trade.
 
-そして最も重要な点:
-
-> **main の検出率はイベントが明るいほど下がる (1.00 → 0.79)。**
-
-検出器がこの振る舞いをすることはあり得ない。原因は §1 に示す設計上の欠陥で、それが惑星イベントを選択的に捨てていた。
+The one measurement that motivates the whole restructure is in §5.2: on `main`, the detection rate *decreases* with the true peak amplitude of the event, from 1.00 below 0.02 mag to 0.79 above 1 mag. §1 explains the mechanism.
 
 ---
 
-## 1. 中心的な問題 — `chi2_red_pspl < 2.5` ゲート
+## 1. The chi2_red_pspl < 2.5 gate
 
-`main` の候補判定は次の一行に集約される (`src/aethra/pspl.py`, `fit_pspl_candidate`):
+On `main`, candidacy is decided by one condition (`src/aethra/pspl.py`, `fit_pspl_candidate`):
 
 ```python
-good_pspl_fit = (... and pspl_result["chi2_red_pspl"] < good_pspl_chi2)   # 既定 2.5
+good_pspl_fit = (... and pspl_result["chi2_red_pspl"] < good_pspl_chi2)   # default 2.5
 is_candidate  = bool(good_pspl_fit)
 ```
 
-そしてパイプライン側 (`src/aethra/pipeline.py`):
+and the pipeline applies it directly (`src/aethra/pipeline.py`):
 
 ```python
 is_candidate = bool(scan_candidate and pspl_info["is_candidate"] and not is_variable_star)
 ```
 
-つまり **PSPL に良く合うことが候補である条件**になっている。
+So an object is a candidate if and only if a single-lens model fits it well.
 
-これは論理が逆立ちしている。惑星・連星のシグナルは**定義上 PSPL からのずれ**であって、単一レンズモデルの χ² を大きくする。ゲートは「モデルが合わない」を「イベントではない」と読み替えており、探している対象そのものを弾く。
+Planetary and binary signals are, by construction, departures from PSPL, and they raise the chi2 of a single-lens fit. The gate reads "the model does not fit" as "there is no event", which removes the class of events the survey is designed to find.
 
-### 実例: `event_0_600_1780`
+### Worked example: `event_0_600_1780`
 
-![PSPL χ² ゲートに落とされた惑星イベント](figures/01-planetary-event-rejected-by-chi2-gate.png)
+![A planetary event rejected by the chi2 gate](figures/01-planetary-event-rejected-by-chi2-gate.png)
 
-シミュレーションの真値 (`Models/event_summary_q_s.csv`, `Nature.txt`):
+Simulation truth (`Models/event_summary_q_s.csv`, `Nature.txt`):
 
-- **惑星レンズ**、質量比 `q = 2.01e-3`、射影分離 `s = 1.14`
-- RTModel 自身の判定: `Successful: Planetary lens with parallax`
-- 単一レンズ PSPL の χ² は 5311443、惑星モデルは 42268 — **126 倍**の差
+- planetary lens, mass ratio `q = 2.01e-3`, projected separation `s = 1.14`, `tE = 51.9 d`
+- RTModel's own verdict: `Successful: Planetary lens with parallax`
+- chi2 of the single-lens model 5311443, of the planetary model 42268 — a factor of 126
 
-aethra の PSPL フィット自体は正しく動いている: `tE = 50.8 d` (真値 51.9)、`u0 = 0.147` (真値 0.137)。**イベントは完全に特徴づけられている。** それでも `chi2_red = 849 > 2.5` なので `main` はこれを候補にしない。
+`main` fits `tE = 38.8 d` at `chi2_red = 849` and rejects the object. This branch fits `tE = 50.8 d`, `u0 = 0.147` at `chi2_red = 143` (the improved seeding of §4.1 recovers the true timescale to 2%), which is still far above 2.5, so the gate would reject it either way. The event is detected here and labelled `non_pspl_candidate`.
 
-パネル (c) が捨てられていた中身で、カスティクス通過による **0.81 mag** の逸脱 (1エポックの測光誤差は 0.005 mag)。これが惑星シグナルそのものである。
+Panel (c) shows what the gate is reacting to: a caustic crossing that leaves a 0.81 mag residual against a per-epoch photometric error of 0.005 mag. That residual is the planetary signal.
 
-### これは一例ではなく系統的
+### The example is representative
 
-| 真のレンズ種別 | n | `chi2_red > 2.5` になる割合 |
+| True lens type | n | fraction with `chi2_red > 2.5` |
 |---|---:|---:|
-| 惑星レンズ | 1401 | **0.228** |
-| 単一レンズ | 774 | 0.049 |
+| planetary lens | 1401 | **0.228** |
+| single lens | 774 | 0.049 |
 
-ゲートは惑星イベントに**4.6倍**の頻度で発火する。`main` が落として本ブランチが拾った 418 件のうち **408 件 (97.6%) が `true_q < 0.03`**、質量比の中央値は `2.8e-4` (地球〜海王星質量域)。内訳は `Planetary lens` 150、`Planetary lens with parallax` 82、`Planetary lens with orbital motion` 69。
-
-**捨てられていたのはノイズではなく、このミッションの主目的だった。**
+The gate fires 4.6 times more often on planetary events than on single-lens ones. Of the 418 events that `main` rejects and this branch detects, 408 (97.6%) have `true_q < 0.03`, with a median mass ratio of `2.8e-4` (Earth to Neptune mass range). By RTModel category: `Planetary lens` 150, `Planetary lens with parallax` 82, `Planetary lens with orbital motion` 69.
 
 ---
 
-## 2. 対処 — 検出を先に、分類を後に
+## 2. Change: detect first, classify second
 
-パイプラインを次の順序に組み直した。
+The pipeline is reordered as follows.
 
 ```
-Stage 2  coherent_peak_scan       モデル不使用の多スケール整合性検出   -> scan_candidate
-Stage 1  renormalize_errors       ベースライン散乱 -> 誤差スケール      -> veto_baseline_variable
-Stage 3  fit_pspl_full            PSPL を「分類軸」として当てる
-Stage 4  residual_structure       残差に局在した構造があるか
-Stage 5  _classify                以上を1つの label に畳む
+Stage 2  coherent_peak_scan       model-free multi-scale coherence  -> scan_candidate
+Stage 1  renormalize_errors       baseline scatter -> error scale   -> veto_baseline_variable
+Stage 3  fit_pspl_full            PSPL fitted as a classification axis
+Stage 4  residual_structure       is there localized structure in the residual
+Stage 5  _classify                fold the above into one label
 ```
 
-**イベントが起きたかどうかは PSPL を見る前に決着する。** PSPL フィットは候補を*落とす*ためではなく、候補を*振り分ける*ために使う。
+Whether an event occurred is decided before PSPL is fitted. The fit is then used to sort candidates, not to remove them.
 
 `src/aethra/pipeline.py:79-95`:
 
@@ -102,13 +97,13 @@ def _classify(scan_candidate, is_variable_star, fit, structure):
     return "pspl_like"
 ```
 
-`EVENT_LABELS = ("pspl_like", "non_pspl_unexplained", "non_pspl_candidate")` で、`event_candidate = label in EVENT_LABELS`。**PSPL が合わないことは候補資格を失わせない** — χ² がいくら悪くても `non_pspl_*` に振り分けられるだけである。
+With `EVENT_LABELS = ("pspl_like", "non_pspl_unexplained", "non_pspl_candidate")` and `event_candidate = label in EVENT_LABELS`, a poor PSPL fit no longer costs an object its candidacy — however large chi2 is, the object is routed to `non_pspl_*`.
 
-ただし `fit_failed` (フィットが数値的に収束しなかった場合) は `EVENT_LABELS` に**入っていない**。本 PR の主旨からすれば、分類段の数値的失敗は検出を取り消すべきではないので、ここは `EVENT_LABELS` に含めるべきかもしれない。全数実行では該当 0 件なので測定値には影響していないが、判断はレビューに委ねる (§9)。
+`fit_failed` (the fit did not converge numerically) is **not** in `EVENT_LABELS`. Given the argument above, a numerical failure in the classification stage arguably should not cancel a detection either, so this may belong in `EVENT_LABELS`. No object in the full run takes that label, so the measurements here are unaffected; the decision is left to review (§9).
 
-全数実行での label 分布:
+Label distribution over the full run:
 
-| label | イベント | 変光星 |
+| label | events | variable stars |
 |---|---:|---:|
 | `pspl_like` | 1998 | 3 |
 | `non_pspl_candidate` | 205 | 0 |
@@ -116,213 +111,211 @@ def _classify(scan_candidate, is_variable_star, fit, structure):
 | `no_event` | 152 | 5616 |
 | `variable_star` | 4 | 5757 |
 
-`non_pspl_candidate` (残差に**局在した**構造がある = アノマリ候補) が 205 件。これは `main` では原理的に存在し得なかったカテゴリである。
+205 objects fall into `non_pspl_candidate` — detected, with localized structure left in the PSPL residual. That category cannot exist under the `main` logic.
 
 ---
 
-## 3. 検出そのものを作った — `coherence.py`
+## 3. New detection stage — `coherence.py`
 
-`main` には「検出」に相当する段がなかった。季節ごとに `analyze_season_scan` で bump を探し、最良季節に PSPL を当てるだけで、静かな光度曲線には平坦な PSPL が χ²_red ≈ 1 で通ってしまう。**これが 874 件の変光星誤検出の正体**であり、同時に「明るいほど検出率が下がる」現象の説明でもある。
+`main` has no stage that decides whether an event happened. It searches for a bump season by season with `analyze_season_scan`, then fits PSPL to the best season. A quiet light curve admits a flat PSPL at `chi2_red ~ 1`, which is the mechanism behind both the 874 variable-star false positives and the amplitude dependence in §5.2.
 
-`src/aethra/coherence.py` の `coherent_peak_scan` を新規に実装した (378 行):
+`coherent_peak_scan` in `src/aethra/coherence.py` (378 lines) does the following:
 
-1. 日単位のメディアンビニング
-2. ロバスト正規化 (メディアンと MAD×1.4826)
-3. 半値幅 `(2, 4, 7, 14, 30)` 日の running median による多スケール平滑化
-4. `score = max(smoothed, 0) × sqrt(窓内の夜数)`
+1. bin to nightly medians
+2. robust normalization (median, MAD × 1.4826)
+3. multi-scale smoothing by running median at half-widths `(2, 4, 7, 14, 30)` d
+4. `score = max(smoothed, 0) × sqrt(nights in window)`
 
-季節分割に依存しない。季節境界をまたぐイベントも、季節が1つしかないデータも扱える。`min_peak_score = 40` が唯一の閾値。
+It does not use season boundaries, so events that straddle a season gap and data with a single season are both handled. `min_peak_score = 40` is the only threshold.
 
-### 却下した改良も測定して記録してある
+### Rejected variants, kept in the docstring with their measurements
 
-同モジュールの docstring に測定値ごと残した。後から同じことを試す人のため。
-
-| 案 | recall | 変光星FP |
+| variant | recall | variable-star FP |
 |---|---|---|
-| 既定 (対称 MAD, `n_refine=0`) | 0.928 | 0.010 |
-| 片側 MAD | 0.928 (不変) | 0.016 |
-| `n_refine=1` (反復ベースライン) | 0.928 (不変) | 0.029 |
+| default (symmetric MAD, `n_refine=0`) | 0.928 | 0.010 |
+| one-sided MAD | 0.928 (unchanged) | 0.016 |
+| `n_refine=1` (iterated baseline) | 0.928 (unchanged) | 0.029 |
 
-いずれもベースライン推定を鋭くする案で、**イベントと変光星に同じだけ効くので勝てない**。
+Both sharpen the baseline estimate, and both sharpen it equally for events and for variables, so neither gains anything.
 
 ---
 
-## 4. 副次的に見つけて直した問題
+## 4. Other problems found and fixed
 
-### 4.1 PSPL フィットの初期値 — `pspl_seed.py` (新規 248 行)
+### 4.1 PSPL seeding — `pspl_seed.py` (new, 248 lines)
 
-`fit_pspl` は単一の初期値からの局所最適化で、深い局所解に落ちていた。`t0` / `tE` / `u0` のグリッドから複数シードを張り、最良を採る `fit_pspl_full` を追加。
+`fit_pspl` optimizes locally from a single starting point and settles into deep local minima. `fit_pspl_full` builds seeds from a grid over `t0`, `tE` and `u0` and takes the best result. `event_0_600_1780` in §1 is one case: `main` returns `tE = 38.8 d` against a truth of 51.9 d, this branch returns 50.8 d.
 
-### 4.2 tE ↔ u0 縮退の暴走分枝 — `fit_degenerate` (新規出力列)
+### 4.2 The runaway branch of the tE-u0 degeneracy — `fit_degenerate` (new column)
 
-![縮退した tE の検出](figures/04-degenerate-timescale-flag.png)
+![Degenerate timescale flag](figures/04-degenerate-timescale-flag.png)
 
-`tE` と `u0` は `teff = u0·tE` をほぼ一定に保って交換できる。この谷の低 `u0` 側の枝は、**曲線を何も良く説明しないまま χ² で勝てる**。実測での最悪例は `event_0_713_2670` で、真値 `tE = 7.3 d` に対してフィットは `tE = 2645 d`、`u0 = 1e-4` (フィットの下限に張り付き)、`chi2_red = 1.06` という何の異常も見えない値。
+`tE` and `u0` trade off along nearly constant `teff = u0·tE`. The low-`u0` arm of that valley can win on chi2 without describing the light curve. The worst case in the run is `event_0_713_2670`: true `tE = 7.3 d`, fitted `tE = 2645 d` with `u0 = 1e-4` pinned at the fit boundary, and `chi2_red = 1.06` — no chi2-based check would notice.
 
-**解法は χ² ではなく自己無矛盾性。** Stage 2 はモデルを使わずに超過の幅を測っている。PSPL のバンプが自分の `tE` より狭くなることはあり得ないので、超過幅より長い `tE` を主張するフィットは定義上おかしい:
+The criterion used is self-consistency rather than chi2. Stage 2 measures the width of the excursion without a model, and a PSPL bump cannot be narrower than its own `tE`, so a fit claiming a timescale much longer than the measured width is inconsistent with the data it is supposed to describe:
 
 ```python
-fit_degenerate = fit["tE_fit"] > max_tE_over_dur * scan["main_duration_days"]   # 既定 3.0
+fit_degenerate = fit["tE_fit"] > max_tE_over_dur * scan["main_duration_days"]   # default 3.0
 ```
 
-閾値の選択 (2218 フィット、うち真に 3 倍以上外れているもの 49 件、10 倍以上 15 件):
+Threshold choice, over the 2218 fitted events (49 of which are truly wrong by more than 3x, 15 by more than 10x):
 
-| 閾値 | 発火数 | 純度 | >10倍外れの捕捉 |
+| threshold | flagged | purity | catches of the 15 >10x errors |
 |---|---:|---:|---:|
-| 1× | 49 (2.2%) | 0.449 | 15/15 |
-| 2× | 19 (0.9%) | 0.737 | 12/15 |
-| **3× (既定)** | **13 (0.6%)** | **0.923** | **10/15** |
-| 5× | 10 (0.5%) | 0.900 | 8/15 |
+| 1x | 49 (2.2%) | 0.449 | 15/15 |
+| 2x | 19 (0.9%) | 0.737 | 12/15 |
+| **3x (default)** | **13 (0.6%)** | **0.923** | **10/15** |
+| 5x | 10 (0.5%) | 0.900 | 8/15 |
 
-1× は当たるより外れる方が多く、読み手にフラグを無視させてしまう。3× を既定にした。
+At 1x the flag fires on more well-measured events than badly measured ones, which would train a reader to ignore it. The default is 3x.
 
-**これは veto ではなく報告である。** イベントは実在し検出されている。データが決めきれていないのは時間スケールだけなので、候補から外すのではなく列に出す。
+The flag is reported, not vetoed. The event is real and detected; it is the timescale the data do not pin down, so it is exposed as a column rather than used to drop the object.
 
-代替案も測定して却下した: `frac_explained < 0.5` は 15 件を捕まえるのに 192 件を巻き込む (純度 0.078)。`u0` が下限に張り付いていることを条件にすると 14 件立つが、うち 5 件は本物の高増光イベント。
+Two alternatives were measured and rejected: `frac_explained < 0.5` catches the same 15 cases but drags in 192 others (purity 0.078); requiring `u0` to sit at the fit boundary flags 14 objects, 5 of which are genuine high-magnification events.
 
-### 4.3 変光星判定 — `variability.py` (新規 209 行)
+### 4.3 Variable-star identification — `variability.py` (new, 209 lines)
 
-`error_renorm` (`renormalize_errors` の返す誤差スケール因子) をモデル不使用の変光星統計として使う。大きい値は「イベント以外の場所でもベースラインが一定でない」を意味し、これは変光星の定義そのもので、周期を必要としない。周期が汚い半規則 LPV を捕まえられるのはこのため。
+`error_renorm`, the error-scale factor returned by `renormalize_errors`, is used as a model-free variability statistic. A large value means the baseline is not constant away from the event, which is the definition of a variable star and does not require a period. This is what catches semi-regular LPVs whose periodograms are messy.
 
-イベントと変光星は既定値 1000 の両側で 2 桁離れていた (検出されたイベントで最大 645、検出された変光星で最小 92000)。
+Events and variables sit two orders of magnitude apart on either side of the default 1000 (largest value among detected events 645, smallest among detected variables 92000).
 
-`periodicity_with_event_masked` はイベント区間をマスクしてから周期を探す。マスク幅は `max(main_duration_days, 2·tE_fit)`。
+`periodicity_with_event_masked` masks the event window before searching for a period, with a mask width of `max(main_duration_days, 2·tE_fit)`.
 
-### 4.4 季節も PSPL フィットも無いデータ — `8beb746`
+### 4.4 Data with neither seasons nor a PSPL fit — `8beb746`
 
-`main` は季節分割と PSPL フィットの両方が成功することを暗黙に要求していた。`coherent_peak_scan` は季節分割を使わないので、単一季節のデータでも検出が立つようになった。フィットが収束しないケースには `fit_failed` label を用意して、少なくとも「イベントは見えたがモデルが当てられなかった」と「そもそも何も無い」を区別できるようにした (前者を候補に含めるかどうかは上記の通り未決)。
+`main` implicitly requires both season splitting and a converged PSPL fit to succeed. `coherent_peak_scan` does not use seasons, so detection now works on single-season data. Where the fit does not converge, the `fit_failed` label at least distinguishes "an event was seen but no model could be fitted" from "nothing is there" (whether that label should count as a candidate is the open question in §2).
 
-### 4.5 `roman_variable` カタログのローダ — `roman_variable.py` (新規 158 行)
+### 4.5 `roman_variable` catalogue loader — `roman_variable.py` (new, 158 lines)
 
-FITS 形式の変光星カタログを読む。**そもそも変光星に対する FPR を測る手段が無かった**ので、これを書くまで `main` の 0.0768 という数字は誰も知らなかった。
-
----
-
-## 5. 結果
-
-### 5.1 レンズ種別ごとの再現率と、変光星クラスごとの誤検出
-
-![再現率と誤検出](figures/02-recall-and-false-positives.png)
-
-**惑星レンズで +21 ポイント (0.7645 → 0.9750、1071 → 1366 / 1401)。** これが本 PR の目的である。
-
-変光星の誤検出は 874 → 3。`main` の誤検出の主犯は LPV ではなく **DSCT (0.347) と FL (0.178)** だった — この分解自体、`roman_variable` ローダを書くまで測れなかった。
-
-残る 3 件はすべて shifted LPV で、`peak_score` は閾値 40 のすぐ上 (42.9–44.8)、`chi2_red` は 247–791。**χ² では蹴らない**のが本 PR の主旨なので、これは設計通りに受け入れたコストである。蹴るなら別の軸が要る。
-
-### 5.2 単一レンズでの後退と、その正体
-
-![トレードとリストの純度](figures/03-the-trade-and-list-purity.png)
-
-正直に書く: **単一レンズ (PSPL) イベントでは 0.950 → 0.886 と後退している。**
-
-しかしパネル (a) がその正体を示している。**`main` の検出率は振幅とともに単調に下がる: 1.00 (< 0.02 mag) → 0.79 (> 1 mag)。** 検出器がこうなることはない。`main` は検出をしていないからで、全曲線に PSPL を当てて χ² が小さいものを残しているだけである。したがって、
-
-- **静かな曲線ほど「候補」になりやすい** → 単一レンズの低振幅側で高い数字が出る、と同時に 874 件の変光星誤検出が出る。両者は同じ挙動の裏表である。
-- **強いイベントほどアノマリで χ² が上がる** → 捨てられる。
-
-本ブランチが失っている 152 件は真の振幅の中央値 0.087 mag、逆に拾った 418 件は中央値 2.454 mag。
-
-パネル (b) が実務上の意味で、人が目で見るリストの中身:
-
-- `main`: 2823 件中 874 件 (**3件に1件**) が変光星
-- 本ブランチ: 2218 件中 3 件 (**739件に1件**)
-
-### 5.3 負例セット — 実測光にイベントが無い場合
-
-シミュレーションだけでは系統誤差の効果が測れないので、2371 本のイベント光度曲線から**イベントのある季節だけを除去**して負例を作った (中央値 33783 点 / 6 季節 / 1713 日)。実際の Roman 測光であり、実際の系統誤差を含み、マイクロレンズだけが無い。
-
-**2369 件中 0 件が候補** [0.00000, 0.00162]。`scan_candidate` 0 件、`hc_periodic` 0 件。
-
-### 5.4 注入回収試験
-
-実測光への PSPL 信号注入 (`mag_inj = mag − 2.5·log10(A)`、非ブレンド `fs=1`)、`tE ∈ {1,3,10,30,100,300} × u0 ∈ {0.05,0.2,0.5,1.0}`、14214 注入:
-
-- `tE ≤ 30 d` は全 `u0` で回収率 **≥ 0.98** (`u0=1.0`、すなわち ΔM = 0.32 mag でも)
-- 回収された `tE` は全域で正確 — 中央値比 1.000、98.9% が ±20% 以内、3 倍以上外れるもの 0%
-- `tE = 100 d` で 0.847、`tE = 300 d` で 0.618 (§6 参照)
+Reads the FITS variable-star catalogue, which is what makes the false-positive rates in §5.1 measurable per class.
 
 ---
 
-## 6. 残っている限界 (診断済み、本 PR には含めない)
+## 5. Results
 
-![長時間イベントの限界](figures/05-long-timescale-mask-limit.png)
+### 5.1 Detection rate by lens type, false positives by variable class
 
-長時間イベントの回収率が落ちる。支配変数は `tE` ではなく**イベントが観測スパンに占める割合**で、`4·tE/span > 0.4` で 0.643、`> 0.8` で 0.591。
+![Recall and false positives](figures/02-recall-and-false-positives.png)
 
-**原因は検出器ではなくマスク幅だった。** `tE = 300 d` の注入で `peak_score > 40` を満たすのは 0.634 あるのに最終残存は 0.1425 で、落としているのは下流の `hc_periodic` — イベントの立ち上がり/立ち下がりの翼がマスクから漏れて ~190 d の周期に見え、注入の **81%** で誤って立っていた。
+Planetary lenses: 0.7645 → 0.9750, i.e. 1071 → 1366 of 1401.
 
-マスク幅を主超過幅の 3 倍にすると `tE=100` が 0.360 → 0.905、`tE=300` が 0.1425 → 0.6025 になる。**コストは測定範囲でゼロ**: 負例FP 0.0、変光星FP は 9 クラスすべて 0.0、LPV の正しい周期検出も 0.520 → 0.500 とほぼ無傷。パネル (b) の非対称性がその理由で、変光星は全スパンに何周期もあるので一山隠しても残りで捕まるが、イベントの山は一つしかない。
+Variable-star false positives: 874 → 3. The dominant contributors on `main` are DSCT (0.347) and FL (0.178) rather than LPV.
 
-修正箇所は 2 つ (`pipeline.py:264` の `mask_days` の床と、`pipeline.py:205` の `renormalize_errors`。後者は fit より前に走るので `2·tE_fit` で広げられず、renorm 膨張 → `veto_baseline_variable` → fit 抑止 → マスクが狭いまま、という順序依存の連鎖を作る)。
+The 3 remaining false positives are all shifted LPVs, with `peak_score` just above the threshold of 40 (42.9–44.8) and `chi2_red` between 247 and 791. A chi2 cut would remove them, but that is the cut this PR removes, so they are accepted as a consequence of the design. Removing them would need a different axis.
 
-**本 PR に含めない理由:** roman_simu 2371 イベントで `tE > 100 d` は **24 件しかなく、うち 21 件は既に検出できている**。この標本で動くのは 2〜3 件で、レビューの焦点を分散させるだけである。実際の Roman の長 `tE` 裾 (重いレンズ・自由浮遊天体の重い側) を本気で扱う段になったら別 PR で入れる。測定と再現スクリプトは手元に残してある。
+### 5.2 The regression on single-lens events
 
-### その他、把握しているが直していない点
+![Detection rate against amplitude, and candidate-list composition](figures/03-the-trade-and-list-purity.png)
 
-- **`t0_fit` の時刻系** — `pipeline.py:350` は出力時に一律 2450000 を引く。入力が完全 JD である前提で、`main` から引き継いだ挙動。roman_simu の時刻は既に HJD−2450000 なので、出力列だけが同じ表の `peak_time` や `truth_t0` と揃わない。パイプライン内部はフィットの生値を使うため**結果には影響しない**が、出力列の解釈には注意が要る。
-- **多バンド** — 現状 F146 単独。`veto_chromatic` は全数実行で 0 件しか立っておらず、色情報は実質未使用。
-- **ブレンド** — 注入は `fs=1` (非ブレンド) なので振幅を楽観的に見積もっている。バルジの混雑度では `fs = 0.1–0.3` が普通で、実効的な FNR は §5.4 より悪い方向に動く。
-- **低質量比アノマリ** — `residual_localized` は `q` に単調追随する (0.031 → 0.049 → 0.087 → 0.180 → 0.194) が、`q < 1e-5` では 0.031 しか立たない。
+On single-lens (PSPL) events the detection rate goes down: 0.950 → 0.886.
+
+Panel (a) shows where that comes from. On `main` the detection rate falls monotonically with the true peak amplitude, from 1.00 below 0.02 mag to 0.79 above 1 mag. That ordering follows from selecting on fit quality rather than on significance:
+
+- a quiet light curve admits a flat PSPL at low chi2, so low-amplitude objects pass — which is also why 874 variables pass
+- a strong event carries larger anomalies, which raise chi2 — so strong events are rejected
+
+The 152 events this branch misses have a median true amplitude of 0.087 mag; the 418 it gains have a median of 2.454 mag.
+
+Panel (b) is the operational consequence, i.e. what a person inspecting the candidate list would see:
+
+- `main`: 874 of 2823 entries are variable stars (1 in 3)
+- this branch: 3 of 2218 (1 in 739)
+
+### 5.3 Negative set — real photometry with no event
+
+To measure the effect of systematics rather than simulation, negatives were built from the 2371 event light curves by removing the season containing the event (median 33783 points, 6 seasons, 1713 days). These are real Roman photometry with real systematics and no microlensing.
+
+0 of 2369 are candidates [0.00000, 0.00162]. `scan_candidate` fires 0 times, `hc_periodic` 0 times.
+
+### 5.4 Injection-recovery
+
+PSPL signals injected into real photometry (`mag_inj = mag − 2.5·log10(A)`, unblended `fs=1`), `tE ∈ {1,3,10,30,100,300} × u0 ∈ {0.05,0.2,0.5,1.0}`, 14214 injections:
+
+- `tE ≤ 30 d`: recovery ≥ 0.98 at every `u0`, including `u0 = 1.0` (ΔM = 0.32 mag)
+- recovered `tE` is accurate throughout: median ratio 1.000, 98.9% within ±20%, none wrong by more than 3x
+- `tE = 100 d`: 0.847; `tE = 300 d`: 0.618 (see §6)
 
 ---
 
-## 7. 追加された設定キーと出力列
+## 6. Known limit, diagnosed but not included in this PR
 
-### 設定キー (すべて既定値つき、`config.get`)
+![Long-timescale mask limit](figures/05-long-timescale-mask-limit.png)
 
-| キー | 既定 | 役割 |
+Recovery drops for long events. The controlling variable is not `tE` itself but the fraction of the observing span the event occupies: recovery is 0.643 for `4·tE/span > 0.4` and 0.591 for `> 0.8`.
+
+The cause is the mask width, not the detector. For `tE = 300 d` injections, 0.634 exceed `peak_score > 40`, but only 0.1425 survive to the end. The loss is downstream: the rising and falling wings of the event leak past the mask and register as a period near 190 d, so `hc_periodic` fires on 81% of those injections.
+
+Setting the mask width to 3x the measured excursion width moves `tE = 100` from 0.360 to 0.905 and `tE = 300` from 0.1425 to 0.6025, at no measured cost: negative FP 0.0, variable-star FP 0.0 in all nine classes, and correct periodic identification of LPVs almost unchanged at 0.520 → 0.500. Panel (b) shows why the change is not symmetric: a variable star has many cycles across the span, so hiding one does not remove its period, whereas an event has only one.
+
+Two sites would need to change: the `mask_days` floor at `pipeline.py:264`, and `renormalize_errors` at `pipeline.py:205`. The latter runs before the fit, so it cannot use `2·tE_fit` and stays at the bare excursion width; this creates an ordering-dependent chain of inflated renorm → `veto_baseline_variable` → no fit → mask never widened.
+
+It is left out of this PR because only 24 of the 2371 events have `tE > 100 d`, and 21 of those are already detected. The change would move 2–3 objects on this sample. It matters for the real long-`tE` tail (heavy lenses, the massive end of free-floating objects); the measurements and the sweep scripts are kept for that.
+
+### Other known, unfixed points
+
+- **`t0_fit` time system** — `pipeline.py:350` subtracts 2450000 on output, inherited from `main`, which assumes the input is full JD. roman_simu times are already HJD−2450000, so that output column does not line up with `peak_time` or `truth_t0` in the same table. The pipeline uses the raw fitted value internally, so results are unaffected, but the column needs care when read.
+- **Single band** — F146 only. `veto_chromatic` fires 0 times in the full run; colour information is effectively unused.
+- **Blending** — injections use `fs = 1`, which overestimates amplitude. Bulge crowding gives `fs = 0.1–0.3` typically, so the effective FNR is worse than §5.4.
+- **Low mass ratio** — `residual_localized` follows `q` monotonically (0.031 → 0.049 → 0.087 → 0.180 → 0.194), but reaches only 0.031 for `q < 1e-5`.
+
+---
+
+## 7. New config keys and output columns
+
+### Config keys (all have defaults, read through `config.get`)
+
+| key | default | role |
 |---|---|---|
-| `min_peak_score` | 40.0 | Stage 2 の検出閾値。これが唯一の検出判定 |
-| `max_error_renorm` | 1000.0 | ベースライン自体が変光しているとみなす誤差スケール |
-| `residual_min_peak_score` | 40.0 | 残差に構造があるとみなす閾値 |
-| `residual_localization_tE` | 2.0 | 残差の構造が `t0` から何 `tE` 以内なら「局在」か |
-| `max_tE_over_duration` | 3.0 | `fit_degenerate` を立てる比 |
+| `min_peak_score` | 40.0 | Stage 2 detection threshold; the only detection decision |
+| `max_error_renorm` | 1000.0 | error scale above which the baseline itself is treated as variable |
+| `residual_min_peak_score` | 40.0 | threshold for calling residual structure significant |
+| `residual_localization_tE` | 2.0 | how many `tE` from `t0` residual structure may sit and still count as localized |
+| `max_tE_over_duration` | 3.0 | ratio at which `fit_degenerate` is raised |
 
-### 出力列
+### Output columns
 
-`OUTPUT_COLUMNS` は 48 列。新規の主なもの:
+`OUTPUT_COLUMNS` has 48 entries. The main additions:
 
-| 列 | 意味 |
+| column | meaning |
 |---|---|
-| `label` | 5 値の分類 (§2) |
-| `event_candidate` | イベント候補か。`label ∈ EVENT_LABELS` |
-| `peak_score` | Stage 2 の整合性スコア |
-| `main_duration_days` | モデル不使用で測った主超過の幅 |
-| `residual_significant` / `residual_localized` | 残差構造の有無と局在性 |
-| `fit_degenerate` | `tE` が縮退分枝に落ちている疑い (§4.2) |
-| `error_renorm` | 誤差スケール因子 |
-| `veto_baseline_variable` / `hc_periodic` | 変光星判定の 2 軸 |
+| `label` | five-valued classification (§2) |
+| `event_candidate` | candidate flag, `label ∈ EVENT_LABELS` |
+| `peak_score` | Stage 2 coherence score |
+| `main_duration_days` | model-free width of the main excursion |
+| `residual_significant` / `residual_localized` | presence and localization of residual structure |
+| `fit_degenerate` | `tE` suspected to sit on the degenerate branch (§4.2) |
+| `error_renorm` | error-scale factor |
+| `veto_baseline_variable` / `hc_periodic` | the two variable-star axes |
 
-`is_candidate` は後方互換のため残してある。
+`is_candidate` is retained for backward compatibility.
 
 ---
 
-## 8. 再現方法
+## 8. Reproducing this
 
 ```bash
-pytest tests/            # 本ブランチで追加したテストを含む
+pytest tests/            # includes the tests added on this branch
 ruff check src tests
 ```
 
-本レポートの数値は以下で再現できる (スクリプトはリポジトリ外の作業領域):
+The numbers above come from:
 
-1. 2371 イベント + 11376 変光星に対する全数実行 → `pipeline_full.csv`
-2. `main` の worktree で同一オブジェクトを実行 → `pipeline_main.csv`
-3. 真のレンズ種別を `Nature.txt` と `Models/event_summary_q_s.csv` から収集
-4. 負例セット: イベント季節を除去した 2369 本
-5. 注入グリッド: 14214 注入
-6. 図: `docs/figures/*.png`
+1. full run over 2371 events + 11376 variable stars → `pipeline_full.csv`
+2. the same objects run in a `main` worktree → `pipeline_main.csv`
+3. true lens types collected from `Nature.txt` and `Models/event_summary_q_s.csv`
+4. negative set: 2369 light curves with the event season removed
+5. injection grid: 14214 injections
+6. figures: `docs/figures/*.png`
 
-ECL/ELL の FITS 6 件は使用可能な拡張を持たないため解析対象外 (13753 → 13747)。これはデータ側の問題でコードの不具合ではない。
+Six ECL/ELL FITS files carry no usable extension and are excluded (13753 → 13747). This is a data-side problem, not a code defect.
 
 ---
 
-## 9. レビューで見てほしい順
+## 9. Suggested review order
 
-1. **§1 の実例** — `chi2_red < 2.5` が惑星イベントを選択的に落とすこと。ここに同意できれば残りは実装の話になる。
-2. **§5.2 のパネル (a)** — `main` の検出率が振幅とともに下がること。これが「検出段が無い」ことの直接的な証拠。
-3. **§4.2 の `fit_degenerate`** — χ² ではなく自己無矛盾性で縮退を捕まえる考え方。閾値は config キーにしてある。
-4. **§5.1 の残り 3 件の誤検出** — χ² ゲートを外した代償を受け入れるかどうか。私は受け入れる立場だが、ここは判断が分かれ得る。
-5. **`fit_failed` を `EVENT_LABELS` に入れるか** (§2) — 本 PR の主旨からは入れるべきに見えるが、現状の実装は入れていない。この標本では該当 0 件で測定値は変わらない。
-6. **§6 の長時間イベント** — 別 PR にする案でよいか。測定は済んでいるので、本 PR に含める判断ならすぐ入る。
+1. **§1** — whether `chi2_red < 2.5` selectively removes planetary events. Everything else follows from agreeing or disagreeing with this.
+2. **§5.2 panel (a)** — the detection rate on `main` falling with amplitude.
+3. **§4.2 `fit_degenerate`** — catching the degeneracy by self-consistency rather than chi2. The threshold is a config key.
+4. **§5.1, the 3 remaining false positives** — whether this is an acceptable cost for dropping the chi2 gate.
+5. **Whether `fit_failed` belongs in `EVENT_LABELS`** (§2). No object takes that label in this run, so no measurement changes either way.
+6. **§6, long events** — whether a separate PR is the right split. The measurements are done, so it can be folded in if preferred.
