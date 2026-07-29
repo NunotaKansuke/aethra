@@ -121,6 +121,16 @@ def recurrent_bump_veto(
     min_points=10,
     min_other_bump_seasons=1,
 ):
+    """Per-season recurrence test. Kept for callers written against the old
+    schema; the pipeline no longer vetoes on it.
+
+    Recurrence is now read off ``n_up`` from the coherence scan, and reported
+    rather than acted on. It cannot be a veto in either form: a long event
+    straddling a seasonal gap shows a bump in more than one season for the same
+    reason a variable does. Measured on 195 detected events and 3 detected
+    LPVs, requiring a single excursion would have cost 8 of the 23 events with
+    tE > 50 d to remove those 3 LPVs.
+    """
     other_hits = []
 
     for season_id, season_df in obj_df_primary.groupby(season_col):

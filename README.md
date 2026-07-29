@@ -10,17 +10,26 @@ multi-band ("achromatic") vetoes.
 
 ## What it does
 
+Detection is model-free and classification comes after, which is the pipeline's
+main design decision. A planetary or binary anomaly is by definition a
+departure from a point-lens model, so deciding what is a candidate by how well
+that model fits throws away the events most worth finding.
+
 For each object the pipeline:
 
-1. Splits the light curve into observing **seasons** (by time gaps).
-2. Scans each season for a brightening **bump** (rolling weighted-flux SNR) and
-   checks the curve is **non-flat** (reduced χ² + consecutive outliers).
-3. Applies three **vetoes** to reject variable stars:
-   - **periodic** — significant Lomb–Scargle periodicity in off-event seasons,
-   - **recurrent** — a comparable bump repeating in other seasons,
-   - **chromatic** — the brightening disagrees across photometric bands.
-4. Fits a **point-source point-lens (PSPL)** model to surviving candidates and
-   flags short-timescale **free-floating-planet (FFP)** candidates.
+1. **Detects** a coherent brightening over the whole light curve — daily
+   binning, robust normalization, multi-scale smoothing — without fitting any
+   model and without scoping to one observing season (`peak_score`).
+2. **Renormalizes the errors** from the scatter of the baseline outside the
+   event.
+3. **Fits a PSPL model** to the whole curve, started from an FFT matched
+   filter that searches t0 globally.
+4. **Scans the fit residuals** with the same coherence machinery: structure
+   localized at t0 means an anomaly, diffuse structure means systematics or a
+   variable.
+5. **Labels** the object — see `label` under Output columns. Variable stars are
+   identified by confident periodicity or by a chromatic brightening; a bad
+   PSPL fit routes an object to `non_pspl_*`, it never discards it.
 
 
 ## Installation
@@ -65,7 +74,9 @@ config = {
 }
 
 results = load_and_run("data.parquet", config)
-candidates = results[results["is_candidate"]]
+
+candidates = results[results["event_candidate"]]          # everything event-like
+anomalies  = results[results["label"] == "non_pspl_candidate"]  # planet/binary
 ```
 
 `load_and_run` auto-dispatches on the input type:
@@ -197,51 +208,94 @@ Passed as the `config` dict (or the matching CLI flag).
 
 | Key                   | Default | Meaning |
 |-----------------------|---------|---------|
-| `min_points`          | `10`    | Minimum points per season to analyze. |
-| `season_gap_days`     | `100`   | Day gap that separates observing seasons. |
-| `ffp_tE_max`          | `2.0`   | Max tE (days) to flag a free-floating-planet candidate. |
-| `good_pspl_chi2`      | `2.5`   | Reduced-χ² threshold for an acceptable PSPL fit. |
-| `chromatic_min_points`| `5`     | Min points per band for the achromatic test. |
-| `fap_threshold`       | `0.01`  | False-alarm threshold for periodicity. **See Known quirks.** |
+| `min_points`             | `10`   | Minimum points in the primary band to analyze. |
+| `season_gap_days`        | `100`  | Day gap that separates observing seasons (reporting only). |
+| `min_peak_score`         | `40.0` | Detection threshold on `peak_score`. The one knob that decides what is found. |
+| `max_error_renorm`       | `1000.0` | Above this the baseline is not a baseline and the object is a variable star. |
+| `residual_min_peak_score`| `40.0` | How strong residual structure must be to count as real. |
+| `residual_localization_tE`| `2.0` | Residual structure within this many tE of t0 counts as localized. |
+| `ffp_tE_max`             | `2.0`  | Max tE (days) to flag a free-floating-planet candidate. |
+| `chromatic_min_points`   | `5`    | Min points per band for the achromatic test. |
+
+`good_pspl_chi2` is no longer read: PSPL quality is reported, not gated on.
 
 ## Output columns
+
+`label` carries the verdict. It is one of:
+
+| Label | Meaning |
+|---|---|
+| `no_event` | Nothing coherent rose above the noise |
+| `variable_star` | Confidently periodic, or the brightening is chromatic |
+| `fit_failed` | An event, but no PSPL fit converged at all |
+| `pspl_like` | An event PSPL describes, with structureless residuals |
+| `non_pspl_unexplained` | An event whose residual structure is diffuse — inspect |
+| `non_pspl_candidate` | An event whose residual structure is localized at t0 — anomaly |
+
+The last three are the events. `event_candidate` is their union and
+`is_candidate` is an alias of it, kept for callers written against the old
+schema — but note it no longer means "PSPL fit well".
 
 | Column | Type | Description |
 |---|---|---|
 | `name` | str | Object identifier |
-| `is_candidate` | bool | Passed bump test and all three vetoes |
+| `label` | str | The verdict, as above |
+| `is_candidate` / `event_candidate` | bool | An event happened |
 | `is_ffp_candidate` | bool | Candidate with tE < `ffp_tE_max` days |
-| `is_variable_star` | bool | Passed bump test but rejected by at least one veto |
-| `veto_periodic` | bool | Rejected by periodicity veto |
-| `veto_recurrent` | bool | Rejected by recurrent bump veto |
-| `veto_chromatic` | bool | Rejected by chromatic veto |
-| `is_achromatic` | bool/nan | Result of achromatic test (`nan` = inconclusive) |
-| `best_season` | int | Season ID with the highest bump SNR |
-| `is_flat` | bool | Lightcurve is consistent with a flat baseline |
-| `chi2_flat` | float | χ² of flat model fit |
-| `dof_flat` | int | Degrees of freedom |
-| `chi2_red_flat` | float | Reduced χ² of flat model |
-| `bump_flag` | bool | Rolling-SNR bump detected |
-| `bump_snr` | float | Peak bump SNR |
+| `is_variable_star` | bool | Periodic or chromatic |
+| `pspl_like`, `non_pspl_candidate`, `non_pspl_unexplained`, `fit_failed` | bool | `label` as indicators |
+| `scan_candidate` | bool | Detection fired (`peak_score > min_peak_score`) |
+| `peak_score` | float | Multi-scale coherence score — the detection statistic |
+| `peak_sigma` | float | Peak height in robust sigma |
+| `peak_time`, `onset_time` | float | Detected peak and start of the excursion (raw time units) |
+| `n_up` | int | Coherent positive excursions found |
+| `pos_ratio`, `duty_cycle` | float | Share of excess that is positive; share of nights in excursions |
+| `main_duration_days`, `duration_fraction` | float | Extent of the main excursion, absolute and relative to the baseline |
+| `n_nights` | int | Nights with data |
+| `hc_periodic` | bool | Confidently periodic on the event-masked curve |
+| `period` | float | Best period found (days) |
+| `veto_periodic` | bool | Same as `hc_periodic` |
+| `veto_recurrent` | bool | `n_up > 1`. **Reported only** — it does not veto anything |
+| `veto_chromatic` | bool | The brightening disagrees across bands |
+| `veto_baseline_variable` | bool | `error_renorm > max_error_renorm` — the curve varies away from the event too |
+| `is_achromatic` | bool/nan | Achromatic test (`nan` = inconclusive) |
+| `error_renorm` | float | Error scale factor from the baseline (floored at 1) |
+| `baseline_chi2_red` | float | Reduced χ² of a constant fit to the baseline |
 | `t0_fit` | float | PSPL best-fit peak time (HJD − 2450000) |
 | `u0_fit` | float | PSPL best-fit impact parameter |
 | `tE_fit` | float | PSPL best-fit Einstein crossing time (days) |
-| `chi2_red_pspl` | float | Reduced χ² of PSPL fit |
-| `baseline_mag` | float | Median baseline magnitude |
-| `peak_mag` | float | Peak (brightest) magnitude |
+| `chi2_red_pspl` | float | Reduced χ² of the PSPL fit |
+| `chi2_red_pspl_renorm` | float | The same divided by `error_renorm`. **Not a filter** — on a variable star the "baseline" is not baseline and this reaches values that pass any threshold |
+| `frac_explained` | float | `1 − χ²_pspl/χ²_flat` |
+| `residual_peak_score` | float | Coherence score of the fit residuals |
+| `residual_offset_tE` | float | Distance from t0 to the residual peak, in tE |
+| `residual_significant` | bool | The residual structure is real |
+| `residual_localized` | bool | ...and sits within `residual_localization_tE` of t0 |
+| `n_seasons` | int | Observing seasons found |
+| `best_season` | int | Season containing the detected peak |
+| `is_flat` | bool | Light curve is consistent with a flat baseline |
+| `chi2_flat`, `dof_flat`, `chi2_red_flat` | float | Constant-model fit over the whole curve |
+| `bump_flag` | bool | Same as `scan_candidate` |
+| `bump_snr` | float | Same as `peak_sigma` |
+| `baseline_mag` | float | Median magnitude outside the event |
+| `peak_mag` | float | Brightest magnitude within it |
 
 ## Package layout
 
 ```
 src/aethra/
 ├── __init__.py      # public API
-├── schema.py        # OUTPUT_COLUMNS
+├── schema.py        # OUTPUT_COLUMNS, LABELS
 ├── config.py        # load_config (YAML → config dict)
-├── detection.py     # outlier / flatness / bump detection + recurrent veto
-├── variability.py   # non-flatness + Lomb–Scargle periodicity veto
+├── coherence.py     # model-free detection: peak_score, excursions (Stage 2)
+├── variability.py   # periodicity, whole-curve and event-masked
 ├── achromatic.py    # multi-band achromaticity test
-├── pspl.py          # PSPL magnification model + fitting
+├── pspl.py          # PSPL model, whole-curve fit, error renorm, residuals
+├── pspl_seed.py     # FFT matched filter for (t0, tE, u0) starting values
+├── detection.py     # legacy per-season bump detection and recurrence veto
 ├── seasons.py       # season splitting and per-season scan
+├── plotting.py      # plot_pspl_fit
+├── roman_variable.py# RGES variable-star FITS loader
 ├── pipeline.py      # run_pipeline_from_dataframe (main driver)
 ├── io.py            # file loaders + load_and_run dispatcher
 └── cli.py           # `aethra` console script

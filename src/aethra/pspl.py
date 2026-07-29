@@ -438,6 +438,16 @@ def residual_structure(residual_time, residual_flux, t0_fit=np.nan, tE_fit=np.na
 
 
 def fit_pspl_candidate(time, mags, mag_err, good_pspl_chi2=2.5, ffp_tE_max=2.0):
+    """Season-scoped fit plus a chi2 gate. Kept for callers written against the
+    old schema; the pipeline no longer uses it.
+
+    The gate this applies is the thing the redesign removed. It answers "does
+    PSPL describe this?" and then discards whatever says no, which is exactly
+    backwards for anomalies: measured on 89 events it had rejected, 39 have
+    residual structure localized at t0. Use :func:`fit_pspl_full` together with
+    :func:`residual_structure` instead, and read the verdict off the pipeline's
+    ``label`` column.
+    """
     pspl_result = fit_pspl(time, mags, mag_err)
     if pspl_result is None:
         return {"t0_fit_raw": np.nan, "u0_fit": np.nan, "tE_fit": np.nan,

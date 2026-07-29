@@ -310,16 +310,22 @@ def test_masking_the_event_does_not_hide_a_real_variable():
     assert result["high_confidence_periodic"]
 
 
-def test_masking_falls_back_when_it_would_remove_too_much():
+def test_masking_abstains_when_the_event_covers_the_baseline():
+    """An event window that swallows the whole curve leaves nothing to test
+    against. Falling back to the unmasked curve would report the event's own
+    rise and fall as a period, which is how long microlensing events were
+    being labelled variable stars."""
     time, mag, err = sinusoid_curve(period=180.0)
     flux = 10 ** (-0.4 * mag)
 
-    # A mask this wide would leave nothing; the unmasked curve is used instead.
     result = periodicity_with_event_masked(
         time, flux, err, peak_time=float(np.median(time)),
         duration_days=1e6,
     )
-    assert result["valid"]
+
+    assert result["valid"] is False
+    assert result["reason"] == "event_covers_baseline"
+    assert result["high_confidence_periodic"] is False
 
 
 def test_masking_is_a_no_op_without_an_event_window():

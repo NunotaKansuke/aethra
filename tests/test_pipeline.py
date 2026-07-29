@@ -78,30 +78,114 @@ def test_pipeline_runs_on_dataframe():
     assert bool(df.iloc[0]["bump_flag"]) is True
 
 
-def test_pipeline_rejects_bad_pspl_fit(monkeypatch):
-    def bad_pspl_fit(*args, **kwargs):
-        return {
-            "t0_fit_raw": 2459060.0,
-            "u0_fit": 0.1,
-            "tE_fit": 8.0,
-            "chi2_red_pspl": 3.0,
-            "is_candidate": False,
-            "is_ffp_candidate": False,
-        }
-
-    monkeypatch.setattr("aethra.pipeline.fit_pspl_candidate", bad_pspl_fit)
-
-    df = run_pipeline_from_dataframe(make_lightcurve(with_event=True), CONFIG)
-
-    assert bool(df.iloc[0]["bump_flag"]) is True
-    assert bool(df.iloc[0]["veto_periodic"]) is False
-    assert bool(df.iloc[0]["veto_recurrent"]) is False
-    assert bool(df.iloc[0]["is_candidate"]) is False
-
-
 def test_flat_lightcurve_is_not_a_candidate():
     df = run_pipeline_from_dataframe(make_lightcurve(with_event=False), CONFIG)
     assert bool(df.iloc[0]["is_candidate"]) is False
+    assert df.iloc[0]["label"] == "no_event"
+
+
+# ── Stage 5 labelling ────────────────────────────────────────────────────────
+
+def make_anomalous_lightcurve(seed=0):
+    """A PSPL event with a short spike on it, as a caustic crossing leaves.
+
+    The spike is snapped to sampled epochs, since an anomaly injected into a
+    gap is indistinguishable from no anomaly at all.
+    """
+    lc = make_lightcurve(with_event=True, seed=seed)
+    time = lc["bjd"].to_numpy()
+    spike_at = time[np.argmin(np.abs(time - 2459066.0))]
+    lc["mag"] = lc["mag"] - 0.3 * np.exp(-0.5 * ((time - spike_at) / 1.0) ** 2)
+    return lc
+
+
+def make_periodic_lightcurve(period=3.0, seed=0):
+    rng = np.random.default_rng(seed)
+    time = np.concatenate([np.linspace(2459000, 2459120, 400),
+                           np.linspace(2459300, 2459420, 400)])
+    mag = 18.0 - 0.4 * np.sin(2 * np.pi * time / period) + rng.normal(0, 0.01, time.size)
+    return pd.DataFrame({"bjd": time, "mag": mag,
+                         "mag_err": np.full_like(time, 0.01), "name": "obj1"})
+
+
+def test_label_is_always_one_of_the_declared_values():
+    from aethra.schema import LABELS
+
+    for lc in (make_lightcurve(with_event=False), make_lightcurve(with_event=True),
+               make_anomalous_lightcurve(), make_periodic_lightcurve()):
+        assert run_pipeline_from_dataframe(lc, CONFIG).iloc[0]["label"] in LABELS
+
+
+def test_clean_event_is_pspl_like():
+    row = run_pipeline_from_dataframe(make_lightcurve(with_event=True), CONFIG).iloc[0]
+
+    assert row["label"] == "pspl_like"
+    assert bool(row["is_candidate"]) is True
+    assert bool(row["residual_significant"]) is False
+    assert abs(row["tE_fit"] - 8.0) < 2.0
+
+
+def test_an_anomaly_is_classified_not_rejected():
+    """The whole point of the redesign. A spike on the peak makes the PSPL fit
+    worse, and under the old chi2 gate that lost the object; now it is the
+    thing that promotes it to non_pspl_candidate."""
+    clean = run_pipeline_from_dataframe(make_lightcurve(with_event=True), CONFIG).iloc[0]
+    anomalous = run_pipeline_from_dataframe(make_anomalous_lightcurve(), CONFIG).iloc[0]
+
+    assert anomalous["chi2_red_pspl"] > clean["chi2_red_pspl"]
+    assert bool(anomalous["is_candidate"]) is True
+    assert anomalous["label"] == "non_pspl_candidate"
+    assert bool(anomalous["residual_significant"]) is True
+    assert bool(anomalous["residual_localized"]) is True
+
+
+def test_periodic_variable_is_labelled_a_variable_star():
+    row = run_pipeline_from_dataframe(make_periodic_lightcurve(), CONFIG).iloc[0]
+
+    assert bool(row["hc_periodic"]) is True
+    assert row["label"] == "variable_star"
+    assert bool(row["is_variable_star"]) is True
+    assert bool(row["is_candidate"]) is False
+
+
+def test_is_candidate_is_an_alias_for_event_candidate():
+    for lc in (make_lightcurve(with_event=False), make_lightcurve(with_event=True),
+               make_anomalous_lightcurve(), make_periodic_lightcurve()):
+        row = run_pipeline_from_dataframe(lc, CONFIG).iloc[0]
+        assert bool(row["is_candidate"]) == bool(row["event_candidate"])
+
+
+def make_long_event_lightcurve(n_seasons=8, tE=900.0, seed=3):
+    """One very long event spread over many observing seasons."""
+    rng = np.random.default_rng(seed)
+    time = np.concatenate([np.linspace(0, 120, 360) + i * 300.0 + 2459000.0
+                           for i in range(n_seasons)])
+    t0 = time[0] + 0.5 * np.ptp(time)
+    mag = 18.0 - 2.5 * np.log10(pspl_magnification(time, t0, 0.05, tE))
+    return pd.DataFrame({"bjd": time, "mag": mag + rng.normal(0, 0.01, time.size),
+                         "mag_err": np.full_like(time, 0.01), "name": "obj1"})
+
+
+def test_recurrence_is_reported_but_does_not_veto():
+    """A long event straddling seasonal gaps fragments into several excursions
+    exactly as a variable does, so n_up cannot be a veto."""
+    row = run_pipeline_from_dataframe(make_long_event_lightcurve(), CONFIG).iloc[0]
+
+    assert row["n_up"] > 1
+    assert bool(row["veto_recurrent"]) is True
+    assert bool(row["is_variable_star"]) is False
+    assert bool(row["is_candidate"]) is True
+
+
+def test_a_long_event_is_not_mistaken_for_a_periodic_variable():
+    """The periodicity mask is taken from the fitted tE, not from the detected
+    excursion, which for a long event covers about one season. Masking only
+    that left the wings behind and they fold at roughly the season spacing."""
+    row = run_pipeline_from_dataframe(make_long_event_lightcurve(tE=700.0), CONFIG).iloc[0]
+
+    assert bool(row["hc_periodic"]) is False
+    assert row["label"] == "pspl_like"
+    assert abs(row["tE_fit"] - 700.0) / 700.0 < 0.1
 
 
 def test_detect_bump_finds_injected_bump():
@@ -300,3 +384,34 @@ def test_load_roman_variable_can_select_filters(tmp_path):
 
     assert len(df) == 3
     assert df["filt"].unique().tolist() == ["F146"]
+
+
+def test_a_wandering_baseline_is_a_variable_star():
+    """The renormalization factor is also a variable-star statistic, and it
+    says what the periodicity test cannot: the curve away from the event is
+    not constant either. That needs no period, which is why it catches the
+    semi-regular variables that fold badly."""
+    rng = np.random.default_rng(11)
+    time = np.concatenate([np.linspace(0, 120, 360) + i * 300.0 + 2459000.0
+                           for i in range(4)])
+    # A bump big enough to detect, on a baseline that is nowhere near constant.
+    mag = (18.0
+           - 1.5 * np.exp(-0.5 * ((time - time[600]) / 25.0) ** 2)
+           + 0.3 * rng.normal(0, 1, time.size))
+    lc = pd.DataFrame({"bjd": time, "mag": mag,
+                       "mag_err": np.full_like(time, 0.001), "name": "obj1"})
+
+    row = run_pipeline_from_dataframe(lc, CONFIG).iloc[0]
+
+    assert row["error_renorm"] > 1000.0
+    assert bool(row["veto_baseline_variable"]) is True
+    assert row["label"] == "variable_star"
+    assert bool(row["is_candidate"]) is False
+
+
+def test_the_baseline_criterion_is_configurable():
+    lc = make_lightcurve(with_event=True)
+    strict = run_pipeline_from_dataframe(lc, {**CONFIG, "max_error_renorm": 0.5}).iloc[0]
+
+    assert bool(strict["veto_baseline_variable"]) is True
+    assert strict["label"] == "variable_star"

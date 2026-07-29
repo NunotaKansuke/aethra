@@ -281,8 +281,14 @@ def periodicity_with_event_masked(time, values, errors=None, peak_time=np.nan,
     the microlensing false-flag rate from roughly a quarter to a few percent
     while leaving long-period variables flagged.
 
-    Falls back to the unmasked curve when the mask would leave too little data
-    or when no event window is supplied.
+    With no event window supplied there is nothing to mask and the raw curve is
+    tested as-is. When a window is supplied but masking it would leave fewer
+    than ``min_points`` points, the event covers essentially the whole
+    baseline; this abstains rather than falling back to the unmasked curve,
+    because that curve is known to contain the event and testing it would
+    report the event's own rise and fall as a period. Long microlensing events
+    do exactly this — a tE of several hundred days over a few observing seasons
+    folds convincingly at roughly the season spacing.
     """
     time = np.asarray(time, dtype=float)
     values = np.asarray(values, dtype=float)
@@ -290,9 +296,9 @@ def periodicity_with_event_masked(time, values, errors=None, peak_time=np.nan,
 
     keep = np.ones(len(time), dtype=bool)
     if np.isfinite(peak_time) and np.isfinite(duration_days) and duration_days > 0:
-        candidate = np.abs(time - peak_time) > mask_factor * duration_days
-        if candidate.sum() >= min_points:
-            keep = candidate
+        keep = np.abs(time - peak_time) > mask_factor * duration_days
+        if keep.sum() < min_points:
+            return _empty_periodicity("event_covers_baseline")
 
     return analyze_periodicity(
         time[keep], values[keep],

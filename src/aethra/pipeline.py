@@ -1,30 +1,97 @@
-"""Main per-DataFrame pipeline driver."""
+"""Main per-DataFrame pipeline driver.
+
+The pipeline runs in five stages, and the split between them is the point.
+Detection (Stage 2) never touches a model, because a planetary or binary
+anomaly is by definition a departure from PSPL and gating on PSPL quality
+throws away exactly the events worth finding. PSPL enters only afterwards, as
+a classification axis: how well it fits, and what the residuals look like when
+it does not.
+
+    Stage 1  renormalize_errors      baseline scatter -> error scale factor
+    Stage 2  coherent_peak_scan      model-free detection, whole curve
+             periodicity_with_event_masked, achromatic test
+    Stage 3  fit_pspl_full           PSPL over the whole curve, FFT-seeded
+    Stage 4  residual_structure      is what PSPL missed localized at t0?
+    Stage 5  label                   see :data:`aethra.schema.LABELS`
+
+Seasons survive only as reporting context and as the unit the achromatic test
+compares within. Nothing in detection or fitting is scoped to one any more:
+that scoping is why no fitted tE in the old catalogue exceeded 100 d while
+true ones reach 723 d.
+"""
 
 import numpy as np
 import pandas as pd
 
 from .achromatic import achromatic_test_from_event
-from .detection import recurrent_bump_veto
-from .pspl import fit_pspl_candidate
-from .schema import OUTPUT_COLUMNS
-from .seasons import analyze_season_scan, split_into_seasons
-from .variability import periodic_veto_from_other_seasons
+from .coherence import coherent_peak_scan
+from .pspl import fit_pspl_full, renormalize_errors, residual_structure
+from .schema import EVENT_LABELS, OUTPUT_COLUMNS
+from .seasons import split_into_seasons
+from .variability import periodicity_with_event_masked
 
-__all__ = ["run_pipeline_from_dataframe"]
+__all__ = ["run_pipeline_from_dataframe", "run_and_report"]
 
 
 def _empty_result(obj_name):
-    """Return a zeroed-out result row for objects with insufficient data."""
-    return {
-        "name": obj_name, "is_candidate": False, "is_ffp_candidate": False,
-        "is_variable_star": False, "best_season": np.nan, "is_flat": True,
-        "chi2_flat": np.nan, "dof_flat": np.nan, "chi2_red_flat": np.nan,
-        "bump_flag": False, "bump_snr": np.nan,
-        "t0_fit": np.nan, "u0_fit": np.nan, "tE_fit": np.nan,
-        "chi2_red_pspl": np.nan, "baseline_mag": np.nan, "peak_mag": np.nan,
+    """A row for an object we could not say anything about."""
+    row = {col: np.nan for col in OUTPUT_COLUMNS}
+    row.update({
+        "name": obj_name, "label": "no_event",
+        "is_candidate": False, "event_candidate": False,
+        "is_ffp_candidate": False, "is_variable_star": False,
+        "pspl_like": False, "non_pspl_candidate": False,
+        "non_pspl_unexplained": False, "fit_failed": False,
+        "scan_candidate": False, "hc_periodic": False,
         "veto_periodic": False, "veto_recurrent": False, "veto_chromatic": False,
-        "n_seasons": np.nan, "is_achromatic": np.nan,
-    }
+        "veto_baseline_variable": False,
+        "residual_significant": False, "residual_localized": False,
+        "bump_flag": False, "is_flat": True, "n_up": 0, "n_nights": 0,
+    })
+    return row
+
+
+def _baseline_and_peak_mag(time, mag, peak_time, duration_days):
+    """Magnitudes outside and at the top of the detected excursion.
+
+    Reported for continuity with the old season-scoped output, but measured
+    over the whole curve: the baseline is the median away from the event, the
+    peak the brightest point within it.
+    """
+    if len(mag) == 0:
+        return np.nan, np.nan
+    inside = np.zeros(len(time), dtype=bool)
+    if np.isfinite(peak_time) and np.isfinite(duration_days) and duration_days > 0:
+        inside = np.abs(time - peak_time) <= duration_days
+    if not inside.any() or inside.all():
+        return float(np.median(mag)), float(np.min(mag))
+    return float(np.median(mag[~inside])), float(np.min(mag[inside]))
+
+
+def _season_of(time, season_ids, peak_time):
+    """Which season the detected peak fell in, for reporting."""
+    if not np.isfinite(peak_time) or len(time) == 0:
+        return np.nan
+    return season_ids[int(np.argmin(np.abs(time - peak_time)))]
+
+
+def _classify(scan_candidate, is_variable_star, fit, structure):
+    """Stage 5. Turn the measured axes into one label.
+
+    The order matters and encodes the separation the redesign is for: whether
+    an event happened is settled before PSPL is consulted, and a PSPL fit that
+    fails to describe the curve downgrades nothing — it routes the object to
+    ``non_pspl_*`` instead of discarding it.
+    """
+    if is_variable_star:
+        return "variable_star"
+    if not scan_candidate:
+        return "no_event"
+    if fit is None:
+        return "fit_failed"
+    if structure["residual_significant"]:
+        return "non_pspl_candidate" if structure["residual_localized"] else "non_pspl_unexplained"
+    return "pspl_like"
 
 
 def run_pipeline_from_dataframe(df, config, debug=False):
@@ -37,13 +104,17 @@ def run_pipeline_from_dataframe(df, config, debug=False):
         Must contain at least the columns named in config['time_col'],
         config['mag_col'], and config['err_col'].
     config : dict
-        See example_run.ipynb (Configuration cell) for all keys.
+        See example_run.ipynb (Configuration cell) for all keys. Beyond the
+        input-column names the ones that change what gets found are
+        ``min_peak_score`` (detection threshold, default 40) and
+        ``residual_min_peak_score`` / ``residual_localization_tE`` (what counts
+        as anomalous residual structure).
     debug : bool
-        If True, print a per-object breakdown of which vetoes fired and why.
+        If True, print a per-object breakdown of each stage's verdict.
 
     Returns
     -------
-    pd.DataFrame with OUTPUT_COLUMNS plus veto/diagnostic columns.
+    pd.DataFrame with :data:`aethra.schema.OUTPUT_COLUMNS`.
     """
     time_col   = config["time_col"]
     mag_col    = config["mag_col"]
@@ -57,10 +128,11 @@ def run_pipeline_from_dataframe(df, config, debug=False):
     min_points        = config.get("min_points",           10)
     gap_days          = config.get("season_gap_days",     100)
     ffp_tE_max        = config.get("ffp_tE_max",          2.0)
-    good_pspl_chi2    = config.get("good_pspl_chi2",      2.5)
-    # NOTE: the periodic veto below currently hardcodes fap_threshold=1e-6
-    # rather than reading config["fap_threshold"]. See README "Known quirks".
     chromatic_min_pts = config.get("chromatic_min_points",  5)
+    min_peak_score    = config.get("min_peak_score",       40.0)
+    max_error_renorm  = config.get("max_error_renorm",   1000.0)
+    residual_min_peak = config.get("residual_min_peak_score", 40.0)
+    localization_tE   = config.get("residual_localization_tE", 2.0)
 
     for col in [time_col, mag_col, err_col]:
         if col not in df.columns:
@@ -86,129 +158,194 @@ def run_pipeline_from_dataframe(df, config, debug=False):
         else:
             obj_df_primary = obj_df_all.copy()
 
-        if len(obj_df_primary) == 0:
+        if len(obj_df_primary) < min_points:
             if debug:
-                print(f"[{obj_name}] SKIP — no rows in primary band '{target_filter}'")
+                print(f"[{obj_name}] SKIP — {len(obj_df_primary)} points in "
+                      f"primary band '{target_filter}', need {min_points}")
             results.append({**_empty_result(obj_name), "n_seasons": n_seasons})
             continue
 
-        season_rows = []
-        for season_id, season_df in obj_df_primary.groupby("season_id"):
-            result = analyze_season_scan(
-                season_df[time_col].to_numpy(),
-                season_df[mag_col].to_numpy(),
-                season_df[err_col].to_numpy(),
-                min_points=min_points,
-            )
-            season_rows.append({
-                "season": season_id,
-                "time":    season_df[time_col].to_numpy(),
-                "mag":     season_df[mag_col].to_numpy(),
-                "mag_err": season_df[err_col].to_numpy(),
-                "n_pts":   len(season_df),
-                **result,
-            })
+        time = obj_df_primary[time_col].to_numpy(dtype=float)
+        mag = obj_df_primary[mag_col].to_numpy(dtype=float)
+        mag_err = obj_df_primary[err_col].to_numpy(dtype=float)
 
-        if not season_rows:
-            results.append({**_empty_result(obj_name), "n_seasons": n_seasons})
-            continue
+        # --- Stage 2: detection, no model, no season scoping ------------------
+        scan = coherent_peak_scan(time, mag, mag_err)
+        scan_candidate = bool(np.isfinite(scan["peak_score"])
+                              and scan["peak_score"] > min_peak_score)
 
-        best = max(season_rows, key=lambda r: r["bump_snr"] if np.isfinite(r["bump_snr"]) else -np.inf)
-
-        scan_candidate = bool(best["bump_flag"] and best["is_non_flat"])
-
-        periodic_veto, veto_period, veto_fap, veto_reason = periodic_veto_from_other_seasons(
-            obj_df_primary=obj_df_primary, best_season=best["season"],
-            time_col=time_col, mag_col=mag_col, err_col=err_col, season_col="season_id",
-            min_points=max(40, min_points), fap_threshold=1e-6,
-            min_period=0.1, max_period=50, min_cycles=4, ceiling_fraction=0.7,
-        )
-
-        recurrent_veto, recurrent_hits = recurrent_bump_veto(
-            obj_df_primary=obj_df_primary, best_season=best["season"],
-            best_bump_snr=best["bump_snr"],
-            time_col=time_col, mag_col=mag_col, err_col=err_col, season_col="season_id",
-            min_points=min_points, min_other_bump_seasons=1,
-        )
-        # To disable the recurrent veto, uncomment the line below and comment out the block above:
-        # recurrent_veto = False
-
+        best_season = _season_of(time, obj_df_primary["season_id"].to_numpy(),
+                                 scan["peak_time"])
         is_achromatic = achromatic_test_from_event(
             obj_df=obj_df_all,
             time_col=time_col, mag_col=mag_col, err_col=err_col,
             filter_col=filter_col,
             season_col="season_id",
-            best_season=best["season"],
-            t0_guess_raw=best["t0_guess_raw"],
-            best_window_days=best["best_window"],
+            best_season=best_season,
+            t0_guess_raw=scan["peak_time"],
+            best_window_days=scan["main_duration_days"],
             primary_filter=primary_filter,
             secondary_filters=secondary_filters,
             min_points=chromatic_min_pts,
         )
         veto_chromatic = (is_achromatic is False)
 
+        # Recurrence is reported, not vetoed on. Measured on 195 detected
+        # events and 3 detected LPVs, requiring n_up == 1 would have removed
+        # 8 of the 23 events with tE > 50 d to remove those 3 LPVs: a long
+        # event straddling a seasonal gap fragments into several excursions
+        # for the same reason a variable does.
+        veto_recurrent = bool(scan["n_up"] > 1)
+
+        # --- Stage 1: what the errors are actually worth ---------------------
+        renorm = renormalize_errors(time, mag, mag_err,
+                                    peak_time=scan["peak_time"],
+                                    duration_days=scan["main_duration_days"])
+
+        # The factor is also the sharpest variable-star statistic there is, and
+        # it says something the periodicity test cannot: the curve away from the
+        # event is not constant either. That is the definition of a variable and
+        # it needs no period, which is why it catches the semi-regular LPVs that
+        # fold badly. Measured on 204 events and 310 variables the two
+        # populations are separated by two orders of magnitude on each side of
+        # this default — no detected event exceeded 645, no detected variable
+        # came in under 92000 — but that is five variables' worth of evidence,
+        # so it is a config key.
+        veto_baseline_variable = bool(renorm["error_renorm"] > max_error_renorm)
+
+        # --- Stage 3 + 4: PSPL as a classification axis ----------------------
+        # Objects already settled as variables by their own baseline are not
+        # fitted: the fit is the expensive step, they are the slowest cases,
+        # and what it returns for them is meaningless anyway (a chi2_red of
+        # 2.5e5 at a tE read off whichever hump the filter locked onto).
+        fit, structure = None, None
+        if scan_candidate and not veto_baseline_variable:
+            fit = fit_pspl_full(time, mag, mag_err,
+                                t0_guess=scan["peak_time"],
+                                duration_days=scan["main_duration_days"],
+                                error_renorm=renorm["error_renorm"])
+            if fit is not None:
+                structure = residual_structure(
+                    fit["residual_time"], fit["residual_flux"],
+                    t0_fit=fit["t0_fit"], tE_fit=fit["tE_fit"],
+                    localization_tE=localization_tE,
+                    min_peak_score=residual_min_peak,
+                )
+
+        # Periodicity comes after the fit because the mask needs the event's
+        # real extent, and the excursion width underestimates it badly for long
+        # events: the robust baseline is measured from the event's own wings, so
+        # a tE = 700 d event reports a ~180 d excursion. Masking only that left
+        # enough of the rising and falling wings behind to look like a ~190 d
+        # period, and 5 of 23 real events with tE > 50 d were being labelled
+        # variable stars because of it.
+        mask_days = scan["main_duration_days"]
+        mask_center = scan["peak_time"]
+        if fit is not None and np.isfinite(fit["tE_fit"]):
+            mask_days = np.nanmax([mask_days, 2.0 * fit["tE_fit"]])
+            mask_center = fit["t0_fit"]
+        periodicity = periodicity_with_event_masked(
+            time, mag, mag_err,
+            peak_time=mask_center, duration_days=mask_days,
+        )
+        hc_periodic = bool(periodicity["high_confidence_periodic"])
+
+        # A confidently periodic object, or one whose baseline is not a
+        # baseline, is a variable star whether or not the coherence scan called
+        # it an event; a chromatic veto only means anything about an event that
+        # was detected.
+        is_variable_star = bool(hc_periodic or veto_baseline_variable
+                                or (scan_candidate and veto_chromatic))
+
+        # --- Stage 5: labelling ----------------------------------------------
+        label = _classify(scan_candidate, is_variable_star, fit, structure)
+        event_candidate = label in EVENT_LABELS
+        is_ffp_candidate = bool(
+            event_candidate and fit is not None
+            and np.isfinite(fit["tE_fit"]) and fit["tE_fit"] < ffp_tE_max
+        )
+
+        baseline_mag, peak_mag = _baseline_and_peak_mag(
+            time, mag, scan["peak_time"], scan["main_duration_days"])
+
         if debug:
-            season_summary = ", ".join(
-                f"S{r['season']}(n={r['n_pts']},snr={r['bump_snr']:.1f},bump={r['bump_flag']})"
-                for r in season_rows
-            )
             print(
-                f"[{obj_name}] "
-                f"n_seasons={n_seasons} | "
-                f"scan_candidate={scan_candidate} "
-                f"(bump={best['bump_flag']}, non_flat={best['is_non_flat']}, "
-                f"best_snr={best['bump_snr']:.2f}, best_season=S{best['season']}) | "
-                f"vetoes: periodic={periodic_veto}({veto_reason}), "
-                f"recurrent={recurrent_veto}({len(recurrent_hits)} other seasons), "
+                f"[{obj_name}] label={label} | n_seasons={n_seasons} | "
+                f"peak_score={scan['peak_score']:.1f} (>{min_peak_score} -> "
+                f"{scan_candidate}), n_up={scan['n_up']} | "
+                f"hc_periodic={hc_periodic}(P={periodicity['period']}), "
                 f"chromatic={veto_chromatic}(is_achromatic={is_achromatic}) | "
-                f"seasons: [{season_summary}]"
+                f"k={renorm['error_renorm']:.2f} | "
+                + (f"tE={fit['tE_fit']:.2f} u0={fit['u0_fit']:.3f} "
+                   f"chi2r={fit['chi2_red_pspl']:.2f} "
+                   f"frac_expl={fit['frac_explained']:.3f}" if fit else "no fit")
+                + (f" | resid score={structure['residual_peak_score']:.1f} "
+                   f"offset={structure['residual_offset_tE']:.2f}tE"
+                   if structure else "")
             )
 
-        if scan_candidate:
-            pspl_info = fit_pspl_candidate(
-                best["time"], best["mag"], best["mag_err"],
-                good_pspl_chi2=good_pspl_chi2, ffp_tE_max=ffp_tE_max,
-            )
-        else:
-            pspl_info = {"t0_fit_raw": np.nan, "u0_fit": np.nan, "tE_fit": np.nan,
-                         "chi2_red_pspl": np.nan, "is_candidate": False, "is_ffp_candidate": False}
-
-        is_variable_star = bool(scan_candidate and (periodic_veto or recurrent_veto or veto_chromatic))
-        is_candidate     = bool(
-            scan_candidate and pspl_info["is_candidate"] and not is_variable_star
-        )
-        is_ffp_candidate = bool(is_candidate and pspl_info["is_ffp_candidate"])
-
-        t0_output = (
-            pspl_info["t0_fit_raw"] - 2450000
-            if np.isfinite(pspl_info["t0_fit_raw"]) else np.nan
-        )
-
-        results.append({
-            "name":             obj_name,
-            "is_candidate":     is_candidate,
+        row = {
+            "name": obj_name,
+            "label": label,
+            "is_candidate": event_candidate,
+            "event_candidate": event_candidate,
             "is_ffp_candidate": is_ffp_candidate,
             "is_variable_star": is_variable_star,
-            "scan_candidate":   scan_candidate,
-            "veto_periodic":    periodic_veto,
-            "veto_recurrent":   recurrent_veto,
-            "veto_chromatic":   veto_chromatic,
-            "is_achromatic":    is_achromatic,
-            "n_seasons":        n_seasons,
-            "best_season":      best["season"],
-            "is_flat":          not best["is_non_flat"],
-            "chi2_flat":        best["chi2_flat"],
-            "dof_flat":         best["dof_flat"],
-            "chi2_red_flat":    best["chi2_red_flat"],
-            "bump_flag":        best["bump_flag"],
-            "bump_snr":         best["bump_snr"],
-            "t0_fit":           t0_output,
-            "u0_fit":           pspl_info["u0_fit"],
-            "tE_fit":           pspl_info["tE_fit"],
-            "chi2_red_pspl":    pspl_info["chi2_red_pspl"],
-            "baseline_mag":     best["baseline_mag"],
-            "peak_mag":         best["peak_mag"],
-        })
+            "pspl_like": label == "pspl_like",
+            "non_pspl_candidate": label == "non_pspl_candidate",
+            "non_pspl_unexplained": label == "non_pspl_unexplained",
+            "fit_failed": label == "fit_failed",
+            "scan_candidate": scan_candidate,
+            "peak_score": scan["peak_score"],
+            "peak_sigma": scan["peak_sigma"],
+            "peak_time": scan["peak_time"],
+            "onset_time": scan["onset_time"],
+            "n_up": scan["n_up"],
+            "pos_ratio": scan["pos_ratio"],
+            "duty_cycle": scan["duty_cycle"],
+            "main_duration_days": scan["main_duration_days"],
+            "duration_fraction": scan["duration_fraction"],
+            "n_nights": scan["n_nights"],
+            "hc_periodic": hc_periodic,
+            "period": periodicity["period"],
+            "veto_periodic": hc_periodic,
+            "veto_recurrent": veto_recurrent,
+            "veto_chromatic": veto_chromatic,
+            "veto_baseline_variable": veto_baseline_variable,
+            "is_achromatic": is_achromatic,
+            "error_renorm": renorm["error_renorm"],
+            "baseline_chi2_red": renorm["baseline_chi2_red"],
+            "n_seasons": n_seasons,
+            "best_season": best_season,
+            "bump_flag": scan_candidate,
+            "bump_snr": scan["peak_sigma"],
+            "baseline_mag": baseline_mag,
+            "peak_mag": peak_mag,
+        }
+        if fit is not None:
+            row.update({
+                "t0_fit": fit["t0_fit"] - 2450000 if np.isfinite(fit["t0_fit"]) else np.nan,
+                "u0_fit": fit["u0_fit"],
+                "tE_fit": fit["tE_fit"],
+                "chi2_red_pspl": fit["chi2_red_pspl"],
+                "chi2_red_pspl_renorm": fit["chi2_red_pspl_renorm"],
+                "frac_explained": fit["frac_explained"],
+                "chi2_flat": fit["chi2_flat"],
+                "dof_flat": fit["dof_flat"],
+                "chi2_red_flat": (fit["chi2_flat"] / fit["dof_flat"]
+                                  if fit["dof_flat"] > 0 else np.nan),
+                "is_flat": False,
+            })
+        else:
+            row["is_flat"] = not scan_candidate
+        if structure is not None:
+            row.update({k: structure[k] for k in (
+                "residual_peak_score", "residual_offset_tE",
+                "residual_significant", "residual_localized")})
+        else:
+            row.update({"residual_significant": False, "residual_localized": False})
+
+        results.append(row)
 
     result_df = pd.DataFrame(results)
     for col in OUTPUT_COLUMNS:
@@ -216,20 +353,21 @@ def run_pipeline_from_dataframe(df, config, debug=False):
             result_df[col] = np.nan
     return result_df[OUTPUT_COLUMNS]
 
+
 def run_and_report(input_path, config, debug=False, output_csv=None):
     from aethra import load_and_run
     results = load_and_run(input_path, config, debug=debug)
 
-    n = len(results)
-    print(f"\nPipeline complete — {n} object(s) processed.")
-    print(f"  veto_periodic:    {results['veto_periodic'].sum()}")
-    print(f"  veto_recurrent:   {results['veto_recurrent'].sum()}")
-    print(f"  veto_chromatic:   {results['veto_chromatic'].sum()}")
-    print(f"  is_variable_star: {results['is_variable_star'].sum()}  (scan_candidate + any veto)")
-    print(f"  is_candidate:     {results['is_candidate'].sum()}")
+    print(f"\nPipeline complete — {len(results)} object(s) processed.")
+    print("  labels:")
+    for label, count in results["label"].value_counts().items():
+        print(f"    {label:<24} {count}")
+    print(f"  event_candidate:  {results['event_candidate'].sum()}"
+          f"   (is_candidate is the same column)")
     print(f"  is_ffp_candidate: {results['is_ffp_candidate'].sum()}")
-    if "scan_candidate" in results.columns:
-        print(f"  scan_candidate:   {results['scan_candidate'].sum()}")
+    print(f"  vetoes: periodic={results['veto_periodic'].sum()} "
+          f"chromatic={results['veto_chromatic'].sum()} "
+          f"(recurrent={results['veto_recurrent'].sum()}, reported only)")
 
     if output_csv:
         results.to_csv(output_csv, index=False)

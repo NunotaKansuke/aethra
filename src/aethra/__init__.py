@@ -52,7 +52,7 @@ from .pspl import (
 )
 from .pspl_seed import pspl_excess_magnification, pspl_fft_seed
 from .roman_variable import load_roman_variable
-from .schema import OUTPUT_COLUMNS
+from .schema import EVENT_LABELS, LABELS, OUTPUT_COLUMNS
 from .seasons import analyze_season_scan, split_into_seasons
 from .variability import (
     analyze_periodicity,
@@ -68,6 +68,8 @@ __version__ = "0.1.0"
 __all__ = [
     "__version__",
     "OUTPUT_COLUMNS",
+    "LABELS",
+    "EVENT_LABELS",
     # entry points
     "load_and_run",
     "run_pipeline_from_dataframe",
