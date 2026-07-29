@@ -24,6 +24,12 @@ PSPL fitting, etc.) are also importable from their respective submodules.
 """
 
 from .achromatic import achromatic_test_from_event
+from .coherence import (
+    coherent_excursions,
+    coherent_peak_scan,
+    daily_median_bins,
+    smooth_multiscale,
+)
 from .config import load_config
 from .detection import (
     detect_bump,
@@ -44,10 +50,12 @@ from .roman_variable import load_roman_variable
 from .schema import OUTPUT_COLUMNS
 from .seasons import analyze_season_scan, split_into_seasons
 from .variability import (
+    analyze_periodicity,
     is_non_flat_lightcurve,
     is_periodic,
     lomb_scargle_test,
     periodic_veto_from_other_seasons,
+    periodicity_with_event_masked,
 )
 
 __version__ = "0.1.0"
@@ -66,11 +74,18 @@ __all__ = [
     "flatness_chi2",
     "detect_bump",
     "recurrent_bump_veto",
+    # coherence (season-free, model-free event detection)
+    "daily_median_bins",
+    "smooth_multiscale",
+    "coherent_excursions",
+    "coherent_peak_scan",
     # variability / periodicity
     "is_non_flat_lightcurve",
     "lomb_scargle_test",
     "is_periodic",
     "periodic_veto_from_other_seasons",
+    "analyze_periodicity",
+    "periodicity_with_event_masked",
     # achromatic
     "achromatic_test_from_event",
     # PSPL

@@ -12,7 +12,25 @@ __all__ = [
     "lomb_scargle_test",
     "is_periodic",
     "periodic_veto_from_other_seasons",
+    "analyze_periodicity",
+    "periodicity_with_event_masked",
 ]
+
+PERIODICITY_DEFAULTS = {
+    "min_points": 20,
+    "min_span_days": 10.0,
+    "min_period": 0.2,
+    "max_period": 400.0,
+    "max_period_fraction": 0.5,
+    "n_frequencies": 512,
+    "phase_bins": 20,
+    "max_fap": 1e-6,
+    "min_power": 0.3,
+    "min_cycles": 3.0,
+    "min_phase_coverage": 0.5,
+    "min_variance_reduction": 0.3,
+    "max_alias_score": 0.9,
+}
 
 
 def is_non_flat_lightcurve(mag, sigma_thresh=3, use_robust=True, n_consecutive=3):
@@ -96,6 +114,191 @@ def is_periodic(time, mag, mag_err=None, fap_threshold=0.01, min_points=10,
     if not np.isfinite(period) or not np.isfinite(fap):
         return False, period, fap
     return (fap < fap_threshold), period, fap
+
+
+def _one_day_alias_score(period):
+    """1.0 when the period sits on a 0.5/1/2 day sampling alias, 0 when far away."""
+    aliases = np.array([0.5, 1.0, 2.0], dtype=float)
+    log_distance = float(np.min(np.abs(np.log(period / aliases))))
+    return float(np.exp(-0.5 * (log_distance / 0.03) ** 2))
+
+
+def _empty_periodicity(reason):
+    return {
+        "valid": False, "reason": reason, "period": np.nan, "power": 0.0,
+        "fap": 1.0, "phase_coverage": 0.0, "cycles": 0.0,
+        "variance_reduction": 0.0, "alias_score": 0.0,
+        "high_confidence_periodic": False,
+    }
+
+
+def analyze_periodicity(time, values, errors=None, **overrides):
+    """Full-curve periodicity test with corroborating evidence beyond the FAP.
+
+    :func:`is_periodic` thresholds the Lomb-Scargle false-alarm probability
+    alone, which is unreliable on real photometry: correlated noise and a
+    single smooth bump both produce tiny FAPs. This test additionally requires
+    the folded curve to look genuinely periodic — enough cycles observed,
+    phase coverage that is not clumped, and a real reduction in scatter when
+    folded — and rejects the 0.5/1/2 day sampling aliases.
+
+    Unlike :func:`periodic_veto_from_other_seasons` this runs on the whole
+    curve at once and searches out to ``max_period`` days (400 by default), so
+    long-period variables are actually reachable. The per-season test caps the
+    period at ``min(50, 0.7 * season length)`` and therefore cannot see them.
+
+    Parameters
+    ----------
+    time, values : array_like
+        Observation times in days and values on a linear scale (flux, not
+        magnitudes, if the result is to be compared against a magnification).
+    errors : array_like, optional
+        Per-point uncertainties. Points with non-finite or non-positive errors
+        are dropped when errors are supplied.
+    **overrides
+        Any key of :data:`PERIODICITY_DEFAULTS`.
+
+    Returns
+    -------
+    dict
+        ``high_confidence_periodic`` is the conservative AND of every
+        criterion, intended as evidence for a variable-star label rather than
+        as a veto on event detection.
+    """
+    config = dict(PERIODICITY_DEFAULTS)
+    unknown = set(overrides) - set(config)
+    if unknown:
+        raise ValueError(f"Unknown periodicity option(s): {sorted(unknown)}")
+    config.update(overrides)
+
+    time = np.asarray(time, dtype=float)
+    values = np.asarray(values, dtype=float)
+    finite = np.isfinite(time) & np.isfinite(values)
+    if errors is not None:
+        errors = np.asarray(errors, dtype=float)
+        finite &= np.isfinite(errors) & (errors > 0)
+    time, values = time[finite], values[finite]
+    errors = None if errors is None else errors[finite]
+
+    if len(time) < config["min_points"]:
+        return _empty_periodicity("too few observations")
+
+    order = np.argsort(time, kind="stable")
+    time, values = time[order], values[order]
+    errors = None if errors is None else errors[order]
+
+    unique = np.concatenate(([True], np.diff(time) > 0))
+    time, values = time[unique], values[unique]
+    errors = None if errors is None else errors[unique]
+
+    span = float(time[-1] - time[0])
+    if span < config["min_span_days"]:
+        return _empty_periodicity("observed span too short")
+
+    max_period = min(config["max_period"], span * config["max_period_fraction"])
+    if max_period <= config["min_period"]:
+        return _empty_periodicity("empty period range")
+
+    center = float(np.median(values))
+    scale = float(1.4826 * np.median(np.abs(values - center)))
+    if not np.isfinite(scale) or scale <= 0:
+        scale = float(np.std(values)) or 1.0
+    normalized = np.clip((values - center) / scale, -20.0, 20.0)
+
+    frequency = np.geomspace(1.0 / max_period, 1.0 / config["min_period"],
+                             int(config["n_frequencies"]))
+    dy = None if errors is None else np.clip(errors / scale, 1e-4, 20.0)
+
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            periodogram = LombScargle(time - time[0], normalized, dy=dy)
+            power = np.asarray(periodogram.power(frequency), dtype=float)
+    except Exception:
+        return _empty_periodicity("periodogram failed")
+
+    if not np.any(np.isfinite(power)):
+        return _empty_periodicity("periodogram failed")
+
+    best = int(np.nanargmax(power))
+    max_power = float(np.clip(power[best], 0.0, 1.0))
+    period = float(1.0 / frequency[best])
+
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            fap = float(np.clip(periodogram.false_alarm_probability(max_power), 0.0, 1.0))
+    except Exception:
+        fap = 1.0
+
+    # Fold and measure how much scatter the periodic model actually removes.
+    phase = np.mod(time - time[0], period) / period
+    bins = int(config["phase_bins"])
+    phase_index = np.minimum((phase * bins).astype(int), bins - 1)
+    occupied = np.unique(phase_index)
+    phase_coverage = float(len(occupied) / bins)
+
+    folded = np.empty_like(normalized)
+    for index in occupied:
+        in_bin = phase_index == index
+        folded[in_bin] = np.median(normalized[in_bin])
+    total_variance = float(np.var(normalized))
+    residual_variance = float(np.var(normalized - folded))
+    variance_reduction = (
+        float(np.clip(1.0 - residual_variance / total_variance, 0.0, 1.0))
+        if total_variance > 0 else 0.0
+    )
+
+    cycles = span / period
+    alias_score = _one_day_alias_score(period)
+
+    high_confidence = bool(
+        fap <= config["max_fap"]
+        and max_power >= config["min_power"]
+        and cycles >= config["min_cycles"]
+        and phase_coverage >= config["min_phase_coverage"]
+        and variance_reduction >= config["min_variance_reduction"]
+        and alias_score < config["max_alias_score"]
+    )
+
+    return {
+        "valid": True, "reason": "accepted", "period": period,
+        "power": max_power, "fap": fap, "phase_coverage": phase_coverage,
+        "cycles": cycles, "variance_reduction": variance_reduction,
+        "alias_score": alias_score,
+        "high_confidence_periodic": high_confidence,
+    }
+
+
+def periodicity_with_event_masked(time, values, errors=None, peak_time=np.nan,
+                                  duration_days=np.nan, mask_factor=1.5,
+                                  min_points=50, **overrides):
+    """Run :func:`analyze_periodicity` with the candidate event removed.
+
+    A single smooth brightening is itself a low-FAP signal, so testing the raw
+    curve flags real events as periodic. Masking ``+-mask_factor * duration``
+    around the peak first removes that confusion; on a mixed sample this drops
+    the microlensing false-flag rate from roughly a quarter to a few percent
+    while leaving long-period variables flagged.
+
+    Falls back to the unmasked curve when the mask would leave too little data
+    or when no event window is supplied.
+    """
+    time = np.asarray(time, dtype=float)
+    values = np.asarray(values, dtype=float)
+    errors = None if errors is None else np.asarray(errors, dtype=float)
+
+    keep = np.ones(len(time), dtype=bool)
+    if np.isfinite(peak_time) and np.isfinite(duration_days) and duration_days > 0:
+        candidate = np.abs(time - peak_time) > mask_factor * duration_days
+        if candidate.sum() >= min_points:
+            keep = candidate
+
+    return analyze_periodicity(
+        time[keep], values[keep],
+        None if errors is None else errors[keep],
+        **overrides,
+    )
 
 
 def periodic_veto_from_other_seasons(
