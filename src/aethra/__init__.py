@@ -33,12 +33,14 @@ from .detection import (
 )
 from .io import load_and_run
 from .pipeline import run_pipeline_from_dataframe
+from .plotting import plot_pspl_fit
 from .pspl import (
     fit_pspl,
     fit_pspl_candidate,
     pspl_magnification,
     solve_fs_fb,
 )
+from .roman_variable import load_roman_variable
 from .schema import OUTPUT_COLUMNS
 from .seasons import analyze_season_scan, split_into_seasons
 from .variability import (
@@ -56,7 +58,9 @@ __all__ = [
     # entry points
     "load_and_run",
     "run_pipeline_from_dataframe",
+    "plot_pspl_fit",
     "load_config",
+    "load_roman_variable",
     # detection
     "has_consecutive_outliers",
     "flatness_chi2",

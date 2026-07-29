@@ -3,6 +3,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+from astropy.io import fits
 
 import aethra as ef
 from aethra import (
@@ -14,6 +15,7 @@ from aethra import (
     run_pipeline_from_dataframe,
     split_into_seasons,
 )
+from aethra.roman_variable import load_roman_variable
 
 
 def make_lightcurve(with_event=True, seed=0):
@@ -123,6 +125,23 @@ def test_fit_pspl_recovers_parameters():
     assert result["tE_fit"] > 0
 
 
+def test_plot_pspl_fit_writes_a_figure(tmp_path):
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    from aethra import plot_pspl_fit
+
+    lc = make_lightcurve(with_event=True)
+    output_path = tmp_path / "pspl-fit.png"
+    fig, axes, fit_result = plot_pspl_fit(
+        lc["bjd"], lc["mag"], lc["mag_err"], save_path=output_path
+    )
+
+    assert output_path.exists()
+    assert len(axes) == 2
+    assert fit_result["chi2_red_pspl"] >= 0
+    fig.clf()
+
+
 def test_load_and_run_accepts_dataframe():
     df = load_and_run(make_lightcurve(), CONFIG)
     assert isinstance(df, pd.DataFrame)
@@ -216,3 +235,68 @@ def test_cli_config_with_flag_override(tmp_path):
     assert config["min_points"] == 25
     # untouched YAML keys survive
     assert config["time_col"] == "bjd"
+
+
+# ── roman_variable FITS loader ───────────────────────────────────────────────
+
+def _write_roman_variable_fixture(tmp_path):
+    time_dir = tmp_path / "top_level"
+    time_dir.mkdir()
+    times = {
+        "F087": np.array([1.0, 2.0]),
+        "F146": np.array([1.1, 1.2, 1.3]),
+        "F213": np.array([1.05, 2.05]),
+    }
+    filenames = {
+        "F087": "roman_times_longcadence.npy",
+        "F146": "roman_times_shortcadence.npy",
+        "F213": "roman_times_longcadence2.npy",
+    }
+    for filt, values in times.items():
+        np.save(time_dir / filenames[filt], values)
+
+    primary = fits.PrimaryHDU()
+    primary.header["NAME"] = "fixture-object"
+    hdus = [primary]
+    for filt, values in times.items():
+        hdus.append(
+            fits.BinTableHDU.from_columns(
+                [
+                    fits.Column(
+                        name="mag",
+                        format="D",
+                        array=np.arange(len(values)) + 18.0,
+                    ),
+                    fits.Column(
+                        name="mag_error",
+                        format="D",
+                        array=np.full(len(values), 0.01),
+                    ),
+                ],
+                name=filt,
+            )
+        )
+    fits_path = tmp_path / "fixture.fits"
+    fits.HDUList(hdus).writeto(fits_path)
+    return fits_path, time_dir
+
+
+def test_load_roman_variable_reads_hdus_and_external_times(tmp_path):
+    fits_path, time_dir = _write_roman_variable_fixture(tmp_path)
+
+    df = load_roman_variable(fits_path, time_dir=time_dir)
+
+    assert list(df.columns) == ["bjd", "mag", "mag_err", "filt", "name"]
+    assert len(df) == 7
+    assert df["name"].unique().tolist() == ["fixture-object"]
+    assert df.groupby("filt").size().to_dict() == {"F087": 2, "F146": 3, "F213": 2}
+    assert df["bjd"].is_monotonic_increasing
+
+
+def test_load_roman_variable_can_select_filters(tmp_path):
+    fits_path, time_dir = _write_roman_variable_fixture(tmp_path)
+
+    df = load_roman_variable(fits_path, time_dir=time_dir, filters="F146")
+
+    assert len(df) == 3
+    assert df["filt"].unique().tolist() == ["F146"]

@@ -84,6 +84,67 @@ from aethra import run_pipeline_from_dataframe
 results = run_pipeline_from_dataframe(df, config)
 ```
 
+### RGES `roman_variable` FITS files
+
+The RGES variable-star dataset stores one filter per FITS extension and keeps
+the time arrays in its `top_level` directory. Use the dedicated loader for one
+FITS light curve:
+
+```python
+from aethra import load_roman_variable, run_pipeline_from_dataframe
+
+lc = load_roman_variable(
+    "../roman_variable/RGES_filters_CEP_lightcurves/"
+    "RGES_filters_OGLE-BLG-CEP-019_lightcurves.fits"
+)
+config = {
+    "time_col": "bjd",
+    "mag_col": "mag",
+    "err_col": "mag_err",
+    "group_col": "name",
+    "filter_col": "filt",
+    "target_filter": "F146",
+    "primary_filter": "F146",
+    "secondary_filters": ["F087", "F213"],
+}
+results = run_pipeline_from_dataframe(lc, config)
+```
+
+The loader automatically finds `roman_variable/top_level` above the FITS file;
+pass `time_dir=...` when the FITS file and time arrays are stored separately.
+
+### Plotting a light curve and its PSPL fit
+
+Install the optional plotting dependency:
+
+```bash
+pip install -e ".[plotting]"
+```
+
+Then pass the data for the event (or for one observing season) to the regular
+Matplotlib helper:
+
+```python
+from aethra import load_roman_variable, plot_pspl_fit
+
+lc = load_roman_variable("event.fits")
+primary = lc[lc["filt"] == "F146"]
+fig, axes, fit = plot_pspl_fit(
+    primary["bjd"], primary["mag"], primary["mag_err"],
+    title="OGLE-BLG-CEP-019 — F146",
+    save_path="pspl-fit.png",
+)
+```
+
+The top axis shows the observed magnitudes and PSPL curve; the bottom axis
+shows `observed - model` residuals.
+
+To compare representative variability classes in `roman_variable`, run:
+
+```bash
+python examples/plot_roman_variable_gallery.py
+```
+
 ## Configuration from a YAML file
 
 Rather than writing the `config` dict inline, you can keep all settings in a

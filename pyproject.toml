@@ -43,6 +43,8 @@ dependencies = [
 [project.optional-dependencies]
 # Reading Parquet input
 parquet = ["pyarrow>=7.0"]
+# Plotting light curves and PSPL fits
+plotting = ["matplotlib>=3.5"]
 # Development / testing
 dev = [
     "pytest>=7.0",
