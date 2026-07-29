@@ -243,11 +243,20 @@ def run_pipeline_from_dataframe(df, config, debug=False):
         # perfectly ordinary chi2_red of 1.05. Stage 2 already measured how wide
         # the excursion is without any model, and a PSPL bump is never narrower
         # than its own tE, so a fit claiming tE longer than the excursion it is
-        # supposed to describe is self-inconsistent. Over 2215 fitted events
-        # this flagged 49 (2.2%); every one of the 15 fits wrong by more than
-        # 10x is inside that set, and no fit outside it was wrong by more than
-        # 3x in more than 0.3% of cases. It is reported, not vetoed: the event
-        # is real and detected, it is the timescale the data do not pin down.
+        # supposed to describe is self-inconsistent. Measured over the 2218
+        # fitted events of the full run, in which 49 fits are truly wrong by
+        # more than 3x and 15 by more than 10x, the threshold trades reach
+        # against purity:
+        #
+        #     ratio > 1x   flags  49 (2.2%)   purity 0.449   catches 15/15
+        #     ratio > 2x   flags  19 (0.9%)   purity 0.737   catches 12/15
+        #     ratio > 3x   flags  13 (0.6%)   purity 0.923   catches 10/15
+        #     ratio > 5x   flags  10 (0.5%)   purity 0.900   catches  8/15
+        #
+        # The default is 3x. At 1x the flag fires on more well-measured events
+        # than bad ones, which would teach a reader to ignore it. It is
+        # reported, not vetoed: the event is real and detected, it is the
+        # timescale the data do not pin down.
         fit_degenerate = bool(
             fit is not None and np.isfinite(fit["tE_fit"])
             and np.isfinite(scan["main_duration_days"]) and scan["main_duration_days"] > 0
