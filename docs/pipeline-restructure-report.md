@@ -16,7 +16,7 @@ Both pipelines were run on the same objects, the same photometry, and the same s
 | FPR (11376 variable stars) | 0.0768 | **0.00026** |
 | FPR (2369 negatives) | — | **0.00000** |
 | Candidate-list purity | 0.690 | **0.9986** |
-| Detection rate, 1401 planetary lenses | 0.7645 | **0.9750** |
+| Detection rate, 1401 events RTModel calls planetary | 0.7645 | **0.9750** |
 
 FNR and FPR move down together; this is not a threshold trade.
 
@@ -57,14 +57,20 @@ Simulation truth (`Models/event_summary_q_s.csv`, `Nature.txt`):
 
 Panel (c) shows what the gate is reacting to: a caustic crossing that leaves a 0.81 mag residual against a per-epoch photometric error of 0.005 mag. That residual is the planetary signal.
 
-### The example is representative
+### What the event groups mean
 
-| True lens type | n | fraction with `chi2_red > 2.5` |
+Every one of the 2371 events has an injected mass ratio in `Models/event_summary_q_s.csv`; there is no single-lens control group in this sample. The grouping used throughout this report comes from the `Successful:` line of `Nature.txt`, which is **RTModel's classification of the light curve** — which model class is needed to describe it — not a statement about what was injected. `Single-Lens-Single-Source` therefore means "the injected planet left no recoverable signature here", not "there is no planet".
+
+| RTModel classification | n | fraction with `chi2_red > 2.5` |
 |---|---:|---:|
 | planetary lens | 1401 | **0.228** |
-| single lens | 774 | 0.049 |
+| binary lens / source | 196 | 0.240 |
+| single-lens-single-source | 759 | 0.050 |
+| no `Nature.txt` | 15 | 0.000 |
 
-The gate fires 4.6 times more often on planetary events than on single-lens ones. Of the 418 events that `main` rejects and this branch detects, 408 (97.6%) have `true_q < 0.03`, with a median mass ratio of `2.8e-4` (Earth to Neptune mass range). By RTModel category: `Planetary lens` 150, `Planetary lens with parallax` 82, `Planetary lens with orbital motion` 69.
+The gate fires 4.5 times more often on light curves with a recoverable planetary signature than on those without. Part of that separation is definitional — `Single-Lens-Single-Source` is assigned precisely when a single-lens model suffices, which is also when aethra's `chi2_red` is small — so this table on its own does not prove the gate is misbehaving. It establishes the weaker and still relevant point: the objects the gate removes are the ones RTModel needs a two-body model for. The non-circular version of the argument is in §5.2, where the ordering is against true peak amplitude, a quantity independent of any chi2.
+
+Of the 418 events `main` rejects and this branch detects, RTModel classifies 327 (78%) as planetary, 52 as binary and 39 as single-lens-single-source. Mass ratio does not explain which events are gained: the gained ones have `q` quartiles `6.1e-5 / 2.8e-4 / 1.6e-3` against `3.2e-5 / 1.3e-4 / 5.9e-4` for all 2371, but the events *lost* relative to `main` sit at `5.6e-5 / 2.6e-4 / 1.4e-3` — the same place as the gained ones. Gained and lost are separated by amplitude, not by `q` (§5.2).
 
 ---
 
@@ -193,32 +199,35 @@ Reads the FITS variable-star catalogue, which is what makes the false-positive r
 
 ## 5. Results
 
-### 5.1 Detection rate by lens type, false positives by variable class
+### 5.1 Detection rate by RTModel classification, false positives by variable class
 
 ![Recall and false positives](figures/02-recall-and-false-positives.png)
 
-Planetary lenses: 0.7645 → 0.9750, i.e. 1071 → 1366 of 1401.
+Events RTModel classifies as needing a planetary model: 0.7645 → 0.9750, i.e. 1071 → 1366 of 1401. As in §1, the groups are RTModel's reading of the light curve, not the injected configuration — all 2371 events have an injected planet.
 
 Variable-star false positives: 874 → 3. The dominant contributors on `main` are DSCT (0.347) and FL (0.178) rather than LPV.
 
 The 3 remaining false positives are all shifted LPVs, with `peak_score` just above the threshold of 40 (42.9–44.8) and `chi2_red` between 247 and 791. A chi2 cut would remove them, but that is the cut this PR removes, so they are accepted as a consequence of the design. Removing them would need a different axis.
 
-### 5.2 The regression on single-lens events
+### 5.2 The regression on events with no recoverable anomaly
 
 ![Detection rate against amplitude, and candidate-list composition](figures/03-the-trade-and-list-purity.png)
 
-On single-lens (PSPL) events the detection rate goes down: 0.9496 → 0.8863. This is a subset of the 2371 events, not the whole sample, so it coexists with the overall gain:
+On the events RTModel classifies as `Single-Lens-Single-Source` the detection rate goes down: 0.9486 → 0.9038. That is one group of 759 inside the 2371, not the whole sample, so it coexists with the overall gain:
 
-| true lens type | n | main | this branch | change |
+| RTModel classification | n | main | this branch | change |
 |---|---:|---:|---:|---:|
 | planetary lens | 1401 | 1071 (0.7645) | 1366 (0.9750) | **+295** |
 | binary lens / source | 196 | 143 (0.7296) | 163 (0.8316) | **+20** |
-| single lens (PSPL) | 774 | 735 (0.9496) | 686 (0.8863) | **−49** |
+| single-lens-single-source | 759 | 720 (0.9486) | 686 (0.9038) | **−34** |
+| no `Nature.txt` | 15 | 15 (1.0000) | 0 (0.0000) | **−15** |
 | **all events** | **2371** | **1949 (0.8220)** | **2215 (0.9342)** | **+266** |
 
-The 49 lost on single-lens events are outweighed by the 295 gained on planetary ones, which is the larger group.
+The 15 events with no `Nature.txt` are held out of the third group rather than folded into it, because RTModel never classified them. They are the low-amplitude failure mode described below rather than a separate effect: peak amplitude 0.022–2.53 mag with a median of 0.055, 10 of the 15 below 0.1 mag. `main` detects all 15, but at `chi2_red ≈ 1.0` with a fitted `tE` whose median is 0.14× the truth and only 1 of 15 within a factor of 2 — the fit passes the gate without measuring the event.
 
-Panel (a) shows where the 49 come from. On `main` the detection rate falls monotonically with the true peak amplitude, from 1.00 below 0.02 mag to 0.79 above 1 mag. Each amplitude bin is the same set of events for both pipelines, so within a bin the two curves share a denominator; the bins themselves are very uneven (5, 77, 76, 196, 473, 1544 events, summing to 2371), which is why the leftmost point carries an error bar half the height of the panel.
+The 34 + 15 lost are outweighed by the 295 gained on the planetary group, which is also the larger group.
+
+Panel (a) shows where the losses come from. On `main` the detection rate falls monotonically with the true peak amplitude, from 1.00 below 0.02 mag to 0.79 above 1 mag. Each amplitude bin is the same set of events for both pipelines, so within a bin the two curves share a denominator; the bins themselves are very uneven (5, 77, 76, 196, 473, 1544 events, summing to 2371), which is why the leftmost point carries an error bar half the height of the panel.
 
 That ordering follows from selecting on fit quality rather than on significance:
 
@@ -333,7 +342,7 @@ The numbers above come from:
 
 1. full run over 2371 events + 11376 variable stars → `pipeline_full.csv`
 2. the same objects run in a `main` worktree → `pipeline_main.csv`
-3. true lens types collected from `Nature.txt` and `Models/event_summary_q_s.csv`
+3. RTModel classifications collected from `Nature.txt`, injected mass ratios from `Models/event_summary_q_s.csv`
 4. negative set: 2369 light curves with the event season removed
 5. injection grid: 14214 injections
 6. figures: `docs/figures/*.png`
